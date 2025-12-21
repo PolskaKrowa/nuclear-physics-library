@@ -163,31 +163,31 @@ contains
     pure subroutine bfgs_update_hessian(H, s, y, rho)
         real(wp), intent(inout) :: H(:,:)
         real(wp), intent(in) :: s(:), y(:), rho
-        
+
         real(wp) :: Hy(size(s)), sT_H(size(s))
         real(wp) :: I_minus_rho_sy(size(s), size(s))
-        real(wp) :: I(size(s), size(s))
+        real(wp) :: Id(size(s), size(s))
         integer :: i, n
-        
+
         n = size(s)
-        
+
         ! Identity matrix
-        I = 0.0_wp
+        Id = 0.0_wp
         do i = 1, n
-            I(i, i) = 1.0_wp
+            Id(i, i) = 1.0_wp
         end do
-        
+
         ! Compute Hy
         Hy = matmul(H, y)
-        
+
         ! BFGS update: H_new = (I - rho*s*y^T) * H * (I - rho*y*s^T) + rho*s*s^T
         ! Simplified: H_new = H + rho*rho*(y^T*H*y)*s*s^T - rho*(H*y*s^T + s*y^T*H)
-        
+
         ! More numerically stable rank-two update:
         H = H - outer_product(Hy, s) * rho - outer_product(s, Hy) * rho &
             + (1.0_wp + rho * sum(y * Hy)) * outer_product(s, s) * rho
     end subroutine bfgs_update_hessian
-    
+
     !> Limited-memory BFGS method
     subroutine lbfgs_minimize(f, grad_f, x0, xmin, config, result)
         procedure(objective_func) :: f
