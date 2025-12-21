@@ -330,7 +330,7 @@ contains
     end subroutine update_lbfgs_history
     
     !> Wolfe line search
-    pure function wolfe_line_search(f, grad_f, x, direction, grad, &
+    function wolfe_line_search(f, grad_f, x, direction, grad, &
                                    tol, func_evals) result(alpha)
         procedure(objective_func) :: f
         procedure(gradient_func) :: grad_f

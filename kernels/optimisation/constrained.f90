@@ -341,7 +341,7 @@ contains
     end function project_gradient
     
     !> Line search with projection
-    pure function projected_line_search(f, x, grad, lower, upper, func_evals) result(alpha)
+    function projected_line_search(f, x, grad, lower, upper, func_evals) result(alpha)
         procedure(objective_func) :: f
         real(wp), intent(in) :: x(:), grad(:), lower(:), upper(:)
         integer, intent(inout) :: func_evals

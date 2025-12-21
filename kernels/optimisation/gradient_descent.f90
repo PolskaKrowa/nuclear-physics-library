@@ -283,7 +283,7 @@ contains
     end subroutine gradient_descent_adam
     
     !> Backtracking line search for step size selection
-    pure function backtracking_line_search(f, grad_f, x, grad, func_evals) result(alpha)
+    function backtracking_line_search(f, grad_f, x, grad, func_evals) result(alpha)
         procedure(objective_func) :: f
         procedure(gradient_func) :: grad_f
         real(wp), intent(in) :: x(:), grad(:)
