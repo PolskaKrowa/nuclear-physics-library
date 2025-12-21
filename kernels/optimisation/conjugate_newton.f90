@@ -218,8 +218,8 @@ contains
     end function compute_beta
     
     !> Strong Wolfe line search
-    pure function strong_wolfe_line_search(f, grad_f, x, direction, grad, &
-                                          tol, func_evals) result(alpha)
+    function strong_wolfe_line_search(f, grad_f, x, direction, grad, &
+                                      tol, func_evals) result(alpha)
         procedure(objective_func) :: f
         procedure(gradient_func) :: grad_f
         real(wp), intent(in) :: x(:), direction(:), grad(:), tol
