@@ -117,7 +117,7 @@ module dormand_prince
     
     ! Abstract interface for ODE function
     abstract interface
-        subroutine ode_func_interface(t, y, dydt)
+        pure subroutine ode_func_interface(t, y, dydt)
             import :: wp
             real(wp), intent(in) :: t
             real(wp), intent(in) :: y(:)
