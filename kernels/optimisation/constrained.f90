@@ -62,7 +62,7 @@ module constrained
         pure function gradient_func(x) result(g)
             import :: wp
             real(wp), intent(in) :: x(:)
-            real(wp) :: g(:)
+            real(wp), allocatable :: g(:)
         end function gradient_func
         
         function constraint_func(x) result(c)
