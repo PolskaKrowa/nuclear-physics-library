@@ -163,13 +163,13 @@ double calculate_void_fraction(double power_fraction, double coolant_temp) {
     double temp_effect = (coolant_temp - 543.0) / 100.0;
     double power_effect = (power_fraction - 1.0);
     
-    double void = 0.15 + 0.3 * power_effect + 0.1 * temp_effect;
+    double voidage = 0.15 + 0.3 * power_effect + 0.1 * temp_effect;
     
     // Clamp between 0 and 0.95
-    if (void < 0.0) void = 0.0;
-    if (void > 0.95) void = 0.95;
+    if (voidage < 0.0) voidage = 0.0;
+    if (voidage > 0.95) voidage = 0.95;
     
-    return void;
+    return voidage;
 }
 
 // ODE system for reactor dynamics
