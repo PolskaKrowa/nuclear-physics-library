@@ -62,19 +62,19 @@ module constrained
         pure function gradient_func(x) result(g)
             import :: wp
             real(wp), intent(in) :: x(:)
-            real(wp) :: g(size(x))
+            real(wp) :: g(:)
         end function gradient_func
         
-        pure function constraint_func(x) result(c)
+        function constraint_func(x) result(c)
             import :: wp
             real(wp), intent(in) :: x(:)
-            real(wp) :: c(:)
+            real(wp), allocatable :: c(:)
         end function constraint_func
         
-        pure function constraint_jacobian_func(x) result(J)
+        function constraint_jacobian_func(x) result(J)
             import :: wp
             real(wp), intent(in) :: x(:)
-            real(wp) :: J(:,:)
+            real(wp), allocatable :: J(:,:)
         end function constraint_jacobian_func
     end interface
     
@@ -166,7 +166,8 @@ contains
         type(constrained_config_t), intent(in) :: config
         type(constrained_result_t), intent(out) :: result
         
-        real(wp) :: x(size(x0)), grad(size(x0)), c(:), penalty
+        real(wp) :: x(size(x0)), grad(size(x0)), penalty
+        real(wp), allocatable :: c(:)
         real(wp) :: grad_norm
         integer :: iter, k, n, nc
         
@@ -183,6 +184,7 @@ contains
             ! Inner loop: minimise penalised objective
             do iter = 1, config%max_iterations / config%penalty_updates
                 ! Compute penalised gradient
+                if (.not. allocated(c)) allocate(c(size(constraints(x))))
                 c = constraints(x)
                 grad = grad_f(x) + penalty * penalty_gradient(x, c, constraints)
                 grad_norm = norm2(grad)
@@ -238,7 +240,7 @@ contains
         real(wp) :: x(size(x0)), grad(size(x0))
         real(wp), allocatable :: c(:), lambda(:), J(:,:)
         real(wp) :: grad_norm, penalty
-        integer :: iter, k, n, nc
+        integer :: iter, k, n, nc, m
         
         n = size(x0)
         x = x0
@@ -373,12 +375,13 @@ contains
     end function projected_line_search
     
     !> Compute gradient of penalty term
-    pure function penalty_gradient(x, c, constraints) result(grad_penalty)
+    function penalty_gradient(x, c, constraints) result(grad_penalty)
         real(wp), intent(in) :: x(:), c(:)
         procedure(constraint_func) :: constraints
         real(wp) :: grad_penalty(size(x))
         
-        real(wp) :: x_plus(size(x)), c_plus(size(c))
+        real(wp) :: x_plus(size(x))
+        real(wp), allocatable :: c_plus(:)
         real(wp), parameter :: h = 1.0e-8_wp
         integer :: i, n
         
@@ -389,6 +392,7 @@ contains
         do i = 1, n
             x_plus = x
             x_plus(i) = x_plus(i) + h
+            if (.not. allocated(c_plus)) allocate(c_plus, source=constraints(x_plus))
             c_plus = constraints(x_plus)
             grad_penalty(i) = sum((c_plus - c) / h * c)
         end do
