@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: NuclearPhysicsLibrary
+Description: A library for nuclear reactor simulations
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lnuclear_physics_kernels -lnuclear_physics_core
+Cflags: -I${includedir}

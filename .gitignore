@@ -1,0 +1,30 @@
+# CMake
+build/
+cmake_install.cmake
+CMakeCache.txt
+CMakeFiles/
+
+# Fortran
+*.mod
+*.smod
+*.o
+*.so
+*.a
+*.exe
+*.dll
+*.lib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
