@@ -51,11 +51,18 @@ contains
         reactor%ny = ny
         reactor%nz = nz
         
+        ! Configure for stability
+        fission_cfg%use_point_kinetics = .true.
+        fission_cfg%power_normalisation = 1.0e6_wp  ! 1 MW nominal
+        
         ! Initialize all physics modules
         call heat_init(reactor%heat, nx, ny, nz, dx, dy, dz, heat_cfg)
         call fluid_init(reactor%fluid, nx, ny, nz, dx, dy, dz, fluid_cfg)
         call fission_init(reactor%fission, nx, ny, nz, dx, dy, dz, fission_cfg)
         call pressure_init(reactor%pressure, nx, ny, nz, dx, dy, dz, pressure_cfg)
+        
+        ! Start at critical (zero reactivity)
+        call fission_set_reactivity(reactor%fission, 0.0_wp)
         
         reactor%initialized = .true.
         handle = c_loc(reactor)
@@ -151,13 +158,21 @@ contains
         real(c_double), value :: insertion_fraction
         type(reactor_state_t), pointer :: reactor
         
-        real(wp) :: reactivity
+        real(wp) :: reactivity, rho_worth
         
         call c_f_pointer(handle, reactor)
         
-        ! Simplified reactivity model
-        ! Full insertion = -$5, Full withdrawal = +$0.5
-        reactivity = 0.005_wp - 0.055_wp * insertion_fraction
+        ! Control rod worth: -$10 at full insertion, 0 at full withdrawal
+        ! Reactivity swing: 0 to -10 dollars
+        rho_worth = -10.0_wp * 0.0065_wp  ! -$10 in absolute units
+        
+        ! Map insertion fraction to reactivity
+        ! 0.0 = withdrawn (slightly positive for power)
+        ! 1.0 = inserted (very negative)
+        reactivity = 0.001_wp + rho_worth * insertion_fraction
+        
+        ! Clamp to safe bounds
+        reactivity = max(-0.065_wp, min(0.002_wp, reactivity))
         
         call fission_set_reactivity(reactor%fission, reactivity)
     end subroutine reactor_set_control_rods

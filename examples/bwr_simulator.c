@@ -90,6 +90,9 @@ void bwr_init_geometry(BWRState* bwr) {
     double power_density = (THERMAL_POWER * 1e6) / 
                           (M_PI * core_radius * core_radius * CORE_HEIGHT);
     
+    // Reduce by factor to account for actual enrichment and geometry
+    power_density *= 0.1;  // Start lower for stability
+    
     for (k = 1; k <= NZ; k++) {
         for (j = 1; j <= NY; j++) {
             for (i = 1; i <= NX; i++) {
@@ -105,7 +108,7 @@ void bwr_init_geometry(BWRState* bwr) {
                     double r_norm = r / core_radius;
                     
                     // Cosine axial profile, Bessel radial profile
-                    double axial_factor = cos(M_PI * (z_norm - 0.5));
+                    double axial_factor = 1.0 + 0.3 * cos(M_PI * (z_norm - 0.5));
                     double radial_factor = 1.0 - 0.3 * r_norm * r_norm;
                     double local_power = power_density * axial_factor * radial_factor;
                     
@@ -187,16 +190,18 @@ void bwr_run_transient(BWRState* bwr, const char* scenario) {
     while (bwr->time < SIM_TIME) {
         // Get adaptive time step
         dt = reactor_get_max_dt(bwr->reactor);
-        dt = fmin(dt, 0.01); // Limit to 10 ms for stability
+        dt = fmin(dt, 0.005);  // Limit to 5 ms for neutronics stability
         
         // Calculate void reactivity feedback
         double void_rho = calculate_void_reactivity(bwr);
         
         // Apply control rod movement (example scenarios)
         if (strcmp(scenario, "rod_withdrawal") == 0) {
-            if (bwr->time > 10.0 && bwr->time < 20.0) {
-                // Withdraw rods over 10 seconds
-                bwr->control_rod_position = fmax(0.0, bwr->control_rod_position - dt/10.0);
+            if (bwr->time > 10.0 && bwr->time < 30.0) {
+                // Slow withdrawal over 20 seconds
+                double withdrawal_rate = -0.02;  // 2% per second
+                bwr->control_rod_position += withdrawal_rate * dt;
+                bwr->control_rod_position = fmax(0.4, bwr->control_rod_position);
             }
         } else if (strcmp(scenario, "scram") == 0) {
             if (bwr->time > 30.0) {
@@ -204,9 +209,10 @@ void bwr_run_transient(BWRState* bwr, const char* scenario) {
                 bwr->control_rod_position = 1.0;
             }
         } else if (strcmp(scenario, "power_ramp") == 0) {
-            if (bwr->time > 5.0 && bwr->time < 25.0) {
+            if (bwr->time > 5.0 && bwr->time < 35.0) {
                 // Slow power increase
-                bwr->control_rod_position = 0.3 * (1.0 - (bwr->time - 5.0) / 20.0);
+                double target_pos = 0.6 - 0.15 * (bwr->time - 5.0) / 30.0;
+                bwr->control_rod_position = target_pos;
             }
         }
         
@@ -217,10 +223,18 @@ void bwr_run_transient(BWRState* bwr, const char* scenario) {
         bwr->time += dt;
         step++;
         
+        // Safety check
+        bwr->total_power = reactor_get_total_power(bwr->reactor) / 1e6;
+        if (bwr->total_power > 1e6 || bwr->total_power != bwr->total_power) {
+            printf("\n✗ ERROR: Numerical instability detected at t=%.2f s\n", bwr->time);
+            printf("Power = %.2e MW (unrealistic)\n", bwr->total_power);
+            fclose(fp);
+            return;
+        }
+        
         // Output at intervals
         if (bwr->time >= next_output) {
             // Get current state
-            bwr->total_power = reactor_get_total_power(bwr->reactor) / 1e6; // MW
             reactor_get_temperature(bwr->reactor, bwr->temperature);
             
             // Calculate statistics
@@ -310,16 +324,61 @@ int main(int argc, char* argv[]) {
     
     // Run steady state first
     printf("\n=== Initializing to Steady State ===\n");
-    reactor_set_control_rods(bwr.reactor, 0.3); // Partial insertion for criticality
     
-    for (int i = 0; i < 100; i++) {
-        double dt = 0.01;
+    // Start subcritical with rods partially inserted
+    reactor_set_control_rods(bwr.reactor, 0.85);  // 85% inserted = subcritical
+    
+    printf("Phase 1: Subcritical hold (rods 85%% inserted)...\n");
+    for (int i = 0; i < 50; i++) {
+        double dt = 0.001;  // 1 ms steps for stability
         reactor_step(bwr.reactor, dt);
         bwr.time += dt;
     }
     
+    // Gradually approach critical
+    printf("Phase 2: Approaching critical...\n");
+    for (int i = 0; i < 200; i++) {
+        double rod_pos = 0.85 - (double)i / 200.0 * 0.25;  // Withdraw to 60%
+        reactor_set_control_rods(bwr.reactor, rod_pos);
+        
+        double dt = 0.001;
+        reactor_step(bwr.reactor, dt);
+        bwr.time += dt;
+        
+        if (i % 50 == 0) {
+            bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
+            printf("  Step %d: Power = %.1f MW, Rods = %.1f%%\n", 
+                   i, bwr.total_power, rod_pos * 100.0);
+        }
+    }
+    
+    // Hold at critical for equilibration
+    printf("Phase 3: Critical equilibration...\n");
+    reactor_set_control_rods(bwr.reactor, 0.60);  // 60% for critical
+    
+    for (int i = 0; i < 500; i++) {
+        double dt = 0.01;
+        reactor_step(bwr.reactor, dt);
+        bwr.time += dt;
+        
+        if (i % 100 == 0) {
+            bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
+            printf("  Power = %.1f MW\n", bwr.total_power);
+        }
+    }
+    
     bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
-    printf("Reached steady state: %.1f MW\n", bwr.total_power);
+    
+    if (bwr.total_power > 1e10 || bwr.total_power != bwr.total_power) {
+        printf("\n✗ ERROR: Reactor went supercritical! Power = %.2e MW\n", bwr.total_power);
+        printf("This indicates numerical instability.\n");
+        printf("Try reducing time step or adjusting reactivity.\n");
+        bwr_destroy(&bwr);
+        return 1;
+    }
+    
+    printf("\n✓ Reached steady state: %.1f MW\n", bwr.total_power);
+    bwr.control_rod_position = 0.60;
     
     // Reset time for transient
     bwr.time = 0.0;
