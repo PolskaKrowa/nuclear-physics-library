@@ -15,6 +15,9 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
 
+add_compile_definitions(_POSIX_C_SOURCE=200809L)
+add_compile_definitions(M_PI=3.14159265358979)
+
 # Build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
