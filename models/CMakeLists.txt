@@ -1,5 +1,5 @@
 set(MODEL_SOURCES
-    fluid_dynamcis.f90
+    fluid_dynamics.f90
     heat_transfer.f90
     nuclear_fission.f90
     pressure_dynamics.f90)
