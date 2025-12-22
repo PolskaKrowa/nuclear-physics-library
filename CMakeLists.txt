@@ -78,7 +78,7 @@ install(EXPORT NuclearPhysicsTargets
 # Create package config
 include(CMakePackageConfigHelpers)
 configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/NuclearPhysicsConfig.cmake.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/NuclearPhysicsConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/NuclearPhysicsConfig.cmake
     INSTALL_DESTINATION lib/cmake/NuclearPhysics)
 
