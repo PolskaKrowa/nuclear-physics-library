@@ -330,7 +330,7 @@ int main(int argc, char* argv[]) {
     
     printf("Phase 1: Subcritical hold (rods 85%% inserted)...\n");
     for (int i = 0; i < 50; i++) {
-        double dt = 0.001;  // 1 ms steps for stability
+        double dt = 0.0001;  // 0.1 ms steps for stability
         reactor_step(bwr.reactor, dt);
         bwr.time += dt;
     }
