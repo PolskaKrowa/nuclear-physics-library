@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(NuclearPhysicsLibrary 
     VERSION 1.0.0
     DESCRIPTION "A library for nuclear reactor simulations"
-    LANGUAGES Fortran)
+    LANGUAGES Fortran C)
 
 set(CMAKE_Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/modules")
 set(CMAKE_FORTRAN_FLAGS "${CMAKE_FORTRAN_FLAGS} -cpp")
