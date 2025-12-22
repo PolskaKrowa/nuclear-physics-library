@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(NuclearPhysicsLibrary 
     VERSION 1.0.0
     DESCRIPTION "A library for nuclear reactor simulations"
-    LANGUAGES Fortran C)
+    LANGUAGES Fortran)
 
 set(CMAKE_Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/modules")
 set(CMAKE_FORTRAN_FLAGS "${CMAKE_FORTRAN_FLAGS} -cpp")
@@ -23,6 +23,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 # Add subdirectories
 add_subdirectory(core)
 add_subdirectory(kernels)
+add_subdirectory(models)
 
 # Installation configuration
 install(DIRECTORY "${CMAKE_BINARY_DIR}/modules/"
@@ -34,6 +35,10 @@ install(TARGETS nuclear_physics_core
     ARCHIVE DESTINATION lib)
 
 install(TARGETS nuclear_physics_kernels
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib)
+
+install(TARGETS nuclear_physics_models
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib)
 
