@@ -353,22 +353,22 @@ contains
         type(pressure_state_t), intent(in) :: state
         integer, intent(in) :: i, j, k
         real(wp) :: c
-        
-        real(wp) :: gamma, K, rho, R_specific
-        
+
+        real(wp) :: gamma, bulkK, rho, R_specific
+
         select case(state%eos(i, j, k)%eos_type)
         case(EOS_IDEAL_GAS)
             ! c = sqrt(γ·R·T)
             gamma = state%eos(i, j, k)%gamma
             R_specific = R_GAS / state%eos(i, j, k)%molar_mass
             c = sqrt(gamma * R_specific * state%T(i, j, k))
-            
+
         case(EOS_INCOMPRESSIBLE)
             ! c = sqrt(K/ρ)
-            K = state%eos(i, j, k)%bulk_modulus
+            bulkK = state%eos(i, j, k)%bulk_modulus
             rho = state%rho(i, j, k)
-            c = sqrt(K / rho)
-            
+            c = sqrt(bulkK / rho)
+
         case(EOS_STIFFENED_GAS)
             gamma = state%eos(i, j, k)%gamma
             R_specific = R_GAS / state%eos(i, j, k)%molar_mass
