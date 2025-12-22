@@ -377,7 +377,7 @@ contains
         case(EOS_WATER_STEAM)
             if (state%T(i, j, k) < 373.15_wp) then
                 ! Liquid
-                K = state%eos(i, j, k)%bulk_modulus
+                bulkK = state%eos(i, j, k)%bulk_modulus
                 rho = state%rho(i, j, k)
                 c = sqrt(K / rho)
             else
