@@ -51,8 +51,8 @@ contains
         reactor%ny = ny
         reactor%nz = nz
         
-        ! Configure for stability
-        fission_cfg%use_point_kinetics = .true.
+        ! Configure for stability - disable point kinetics for now
+        fission_cfg%use_point_kinetics = .false.  ! Use spatial diffusion instead
         fission_cfg%power_normalisation = 1.0e6_wp  ! 1 MW nominal
         
         ! Initialize all physics modules

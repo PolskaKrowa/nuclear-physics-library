@@ -6,8 +6,12 @@
 // - Core with fuel assemblies
 // - Coolant flow and boiling
 // - Steam separation
-// - Control rod actuation
-// - Void feedback reactivity
+// - Control rod actuation (modulates heat source)
+// - Thermal-hydraulic feedback
+//
+// NOTE: This version uses a quasi-static neutronics model where
+//       control rods modulate the fixed power distribution.
+//       Full point kinetics is planned for future versions.
 //
 // Compile: gcc bwr_simulator.c -o bwr_sim -lnuclear_physics_c -lm
 //
@@ -326,58 +330,43 @@ int main(int argc, char* argv[]) {
     printf("\n=== Initializing to Steady State ===\n");
     
     // Start subcritical with rods partially inserted
-    reactor_set_control_rods(bwr.reactor, 0.85);  // 85% inserted = subcritical
+    reactor_set_control_rods(bwr.reactor, 0.60);  // Start near critical
     
-    printf("Phase 1: Subcritical hold (rods 85%% inserted)...\n");
-    for (int i = 0; i < 50; i++) {
-        double dt = 0.0001;  // 0.1 ms steps for stability
-        reactor_step(bwr.reactor, dt);
-        bwr.time += dt;
-    }
+    printf("Equilibrating thermal-hydraulics (neutronic feedback disabled)...\n");
     
-    // Gradually approach critical
-    printf("Phase 2: Approaching critical...\n");
-    for (int i = 0; i < 200; i++) {
-        double rod_pos = 0.85 - (double)i / 200.0 * 0.25;  // Withdraw to 60%
-        reactor_set_control_rods(bwr.reactor, rod_pos);
-        
-        double dt = 0.001;
+    // Let thermal-hydraulics settle without neutronics
+    for (int i = 0; i < 1000; i++) {
+        double dt = 0.005;  // 5 ms steps
         reactor_step(bwr.reactor, dt);
         bwr.time += dt;
         
-        if (i % 50 == 0) {
+        if (i % 200 == 0) {
             bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
-            printf("  Step %d: Power = %.1f MW, Rods = %.1f%%\n", 
-                   i, bwr.total_power, rod_pos * 100.0);
-        }
-    }
-    
-    // Hold at critical for equilibration
-    printf("Phase 3: Critical equilibration...\n");
-    reactor_set_control_rods(bwr.reactor, 0.60);  // 60% for critical
-    
-    for (int i = 0; i < 500; i++) {
-        double dt = 0.01;
-        reactor_step(bwr.reactor, dt);
-        bwr.time += dt;
-        
-        if (i % 100 == 0) {
-            bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
-            printf("  Power = %.1f MW\n", bwr.total_power);
+            printf("  Step %d (%.2f s): Power = %.1f MW\n", 
+                   i, bwr.time, bwr.total_power);
+            
+            // Safety check
+            if (bwr.total_power > 1e10 || bwr.total_power != bwr.total_power) {
+                printf("\n✗ ERROR: Numerical instability at initialization!\n");
+                bwr_destroy(&bwr);
+                return 1;
+            }
         }
     }
     
     bwr.total_power = reactor_get_total_power(bwr.reactor) / 1e6;
     
-    if (bwr.total_power > 1e10 || bwr.total_power != bwr.total_power) {
-        printf("\n✗ ERROR: Reactor went supercritical! Power = %.2e MW\n", bwr.total_power);
-        printf("This indicates numerical instability.\n");
-        printf("Try reducing time step or adjusting reactivity.\n");
+    if (bwr.total_power > 1e10 || bwr.total_power != bwr.total_power || bwr.total_power < 0) {
+        printf("\n✗ ERROR: Invalid power level: %.2e MW\n", bwr.total_power);
+        printf("This indicates a problem with the physics coupling.\n");
+        printf("\nNote: Point kinetics is disabled in this version.\n");
+        printf("Power is determined by fixed heat sources.\n");
         bwr_destroy(&bwr);
         return 1;
     }
     
-    printf("\n✓ Reached steady state: %.1f MW\n", bwr.total_power);
+    printf("\n✓ Reached quasi-steady state: %.1f MW\n", bwr.total_power);
+    printf("(Note: Simplified model with fixed fission power distribution)\n");
     bwr.control_rod_position = 0.60;
     
     // Reset time for transient
