@@ -262,4 +262,4 @@ If you use this library in your research, please cite:
 
 ---
 
-**Note**: This library is intended for educational and research purposes. For production reactor simulations, additional
+**Note**: This library is intended for educational and research purposes.
