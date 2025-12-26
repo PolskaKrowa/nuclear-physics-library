@@ -34,6 +34,8 @@ add_subdirectory(core)
 add_subdirectory(kernels)
 target_link_libraries(nuclear_physics_kernels nuclear_physics_core ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
 
+add_subdirectory(tests)
+
 # Models library (depends on kernels and core)
 add_subdirectory(models)
 target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_physics_core)
