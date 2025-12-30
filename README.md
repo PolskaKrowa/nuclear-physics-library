@@ -248,7 +248,7 @@ If you use this library in your research, please cite:
 - [ ] Fuel depletion and burnup tracking
 
 ### In Progress
-- [ ] Comprehensive test suite
+- [x] Comprehensive test suite
 - [ ] User documentation and tutorials
 - [ ] Example reactor simulations
 
