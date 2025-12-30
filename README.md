@@ -1,4 +1,5 @@
 # Nuclear Physics Library
+[![Build Status](https://github.com/PolskaKrowa/nuclear-physics-library/actions/workflows/main.yml/badge.svg)](https://github.com/PolskaKrowa/nuclear-physics-library/actions)
 
 A somewhat high-performance Fortran library for nuclear reactor simulation and computational physics. This library provides a comprehensive suite of numerical methods, physics models, and mathematical utilities for developing multiphysics reactor simulations.
 
