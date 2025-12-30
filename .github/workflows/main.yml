@@ -14,17 +14,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up gfortran
-        run: sudo apt-get update && sudo apt-get install -y gfortran make
-
-      - name: Build library
+      - name: Install dependencies
         run: |
-          make all || exit 1   # Adjust to your build command if not using Makefile
+          sudo apt-get update
+          sudo apt-get install -y gfortran cmake make libopenblas-dev
+
+      - name: Configure with CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake -DBLAS_LIBRARIES=/usr/lib/x86_64-linux-gnu/libopenblas.so \
+                -DLAPACK_LIBRARIES=/usr/lib/x86_64-linux-gnu/libopenblas.so \
+                ..
+
+      - name: Build
+        run: |
+          cd build
+          cmake --build . -- -j$(nproc)
 
       - name: Run tests
         run: |
-          if [ -f ./tests/run_tests.sh ]; then
-            bash ./tests/run_tests.sh
-          else
-            echo "No tests found"
-          fi
+          cd build/tests
+          ./test_suite
