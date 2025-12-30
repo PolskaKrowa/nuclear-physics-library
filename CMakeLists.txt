@@ -15,6 +15,8 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
 
+set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -lapack -lblas")
+
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_definitions(M_PI=3.14159265358979)
 
