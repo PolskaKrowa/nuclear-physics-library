@@ -1,0 +1,30 @@
+name: Build Nuclear Physics Library
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up gfortran
+        run: sudo apt-get update && sudo apt-get install -y gfortran make
+
+      - name: Build library
+        run: |
+          make all || exit 1   # Adjust to your build command if not using Makefile
+
+      - name: Run tests
+        run: |
+          if [ -f ./tests/run_tests.sh ]; then
+            bash ./tests/run_tests.sh
+          else
+            echo "No tests found"
+          fi
