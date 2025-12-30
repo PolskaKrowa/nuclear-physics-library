@@ -68,7 +68,7 @@ Nuclear Physics Library is a high‑performance Fortran toolkit providing utilit
 ### Prerequisites
 
 - **Fortran Compiler**: gfortran 9.0+ or ifort
-- **CMake**: Version 3.10 or higher
+- **CMake**: Version 3.20 or higher
 - **BLAS/LAPACK**: For linear algebra operations
 - **MSYS2**: If compiling on Windows
 
