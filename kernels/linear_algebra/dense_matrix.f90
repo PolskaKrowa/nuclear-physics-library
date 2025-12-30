@@ -23,71 +23,9 @@ module dense_matrix
     integer(i32), parameter, public :: MAT_ERR_SINGULAR = 2
     integer(i32), parameter, public :: MAT_ERR_LAPACK = 3
     
-    ! BLAS/LAPACK interfaces
-    interface
-        subroutine dgemv(trans, m, n, alpha, a, lda, x, incx, beta, y, incy)
-            use kinds, only: wp
-            character, intent(in) :: trans
-            integer, intent(in) :: m, n, lda, incx, incy
-            real(wp), intent(in) :: alpha, beta
-            real(wp), intent(in) :: a(:, :), x(:)
-            real(wp), intent(inout) :: y(:)
-        end subroutine dgemv
-        
-        subroutine dgemm(transA, transB, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
-            use kinds, only: wp
-            character, intent(in) :: transA, transB
-            integer, intent(in) :: m, n, k, lda, ldb, ldc
-            real(wp), intent(in) :: alpha, beta
-            real(wp), intent(in) :: a(:, :), b(:, :)
-            real(wp), intent(inout) :: c(:, :)
-        end subroutine dgemm
-        
-        real(wp) function dlange(norm, m, n, a, lda, work)
-            use kinds, only: wp
-            character, intent(in) :: norm
-            integer, intent(in) :: m, n, lda
-            real(wp), intent(in) :: a(:, :)
-            real(wp), intent(inout) :: work(:)
-        end function dlange
-        
-        subroutine dgetrf(m, n, a, lda, ipiv, info)
-            use kinds, only: wp
-            integer, intent(in) :: m, n, lda
-            real(wp), intent(inout) :: a(:, :)
-            integer, intent(out) :: ipiv(:), info
-        end subroutine dgetrf
-        
-        subroutine dgetri(n, a, lda, ipiv, work, lwork, info)
-            use kinds, only: wp
-            integer, intent(in) :: n, lda, lwork
-            real(wp), intent(inout) :: a(:, :), work(:)
-            integer, intent(in) :: ipiv(:)
-            integer, intent(out) :: info
-        end subroutine dgetri
-        
-        subroutine dgesvd(jobu, jobvt, m, n, a, lda, s, u, ldu, vt, ldvt, work, lwork, info)
-            use kinds, only: wp
-            character, intent(in) :: jobu, jobvt
-            integer, intent(in) :: m, n, lda, ldu, ldvt, lwork
-            real(wp), intent(inout) :: a(:, :)
-            real(wp), intent(out) :: s(:), u(:, :), vt(:, :), work(:)
-            integer, intent(out) :: info
-        end subroutine dgesvd
-        
-        subroutine dpotrf(uplo, n, a, lda, info)
-            use kinds, only: wp
-            character, intent(in) :: uplo
-            integer, intent(in) :: n, lda
-            real(wp), intent(inout) :: a(:, :)
-            integer, intent(out) :: info
-        end subroutine dpotrf
-    end interface
-    
 contains
 
     !> Matrix-vector multiplication: y = alpha * A * x + beta * y
-    !! Uses BLAS DGEMV
     subroutine matrix_vector_mult(A, x, y, alpha, beta, trans)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(in) :: x(:)
@@ -97,13 +35,13 @@ contains
         
         real(wp) :: alpha_val, beta_val
         character :: trans_char
-        integer :: m, n, lda, incx, incy
+        integer :: m, n
+        real(wp), allocatable :: A_work(:, :), x_work(:), y_work(:)
+        
+        external :: dgemv
         
         m = size(A, 1)
         n = size(A, 2)
-        lda = m
-        incx = 1
-        incy = 1
         
         alpha_val = 1.0_wp
         beta_val = 0.0_wp
@@ -115,11 +53,25 @@ contains
             if (trans) trans_char = 'T'
         end if
         
-        call dgemv(trans_char, m, n, alpha_val, A, lda, x, incx, beta_val, y, incy)
+        ! Create contiguous working copies
+        allocate(A_work(m, n))
+        allocate(x_work(size(x)))
+        allocate(y_work(size(y)))
+        
+        A_work = A
+        x_work = x
+        y_work = y
+        
+        ! Call BLAS dgemv
+        call dgemv(trans_char, m, n, alpha_val, A_work, m, x_work, 1, beta_val, y_work, 1)
+        
+        ! Copy result back
+        y = y_work
+        
+        deallocate(A_work, x_work, y_work)
     end subroutine matrix_vector_mult
     
     !> Matrix-matrix multiplication: C = alpha * A * B + beta * C
-    !! Uses BLAS DGEMM
     subroutine matrix_matrix_mult(A, B, C, alpha, beta, transA, transB)
         real(wp), intent(in) :: A(:, :), B(:, :)
         real(wp), intent(inout) :: C(:, :)
@@ -129,6 +81,9 @@ contains
         real(wp) :: alpha_val, beta_val
         character :: transA_char, transB_char
         integer :: m, n, k, lda, ldb, ldc
+        real(wp), allocatable :: A_work(:, :), B_work(:, :), C_work(:, :)
+        
+        external :: dgemm
         
         alpha_val = 1.0_wp
         beta_val = 0.0_wp
@@ -163,8 +118,22 @@ contains
         ldb = size(B, 1)
         ldc = size(C, 1)
         
+        ! Create contiguous working copies
+        allocate(A_work(size(A, 1), size(A, 2)))
+        allocate(B_work(size(B, 1), size(B, 2)))
+        allocate(C_work(size(C, 1), size(C, 2)))
+        
+        A_work = A
+        B_work = B
+        C_work = C
+        
         call dgemm(transA_char, transB_char, m, n, k, alpha_val, &
-                   A, lda, B, ldb, beta_val, C, ldc)
+                   A_work, lda, B_work, ldb, beta_val, C_work, ldc)
+        
+        ! Copy result back
+        C = C_work
+        
+        deallocate(A_work, B_work, C_work)
     end subroutine matrix_matrix_mult
     
     !> Transpose a matrix
@@ -198,31 +167,34 @@ contains
     end function matrix_scale
     
     !> Compute matrix norm
-    !! norm_type: '1' = 1-norm, 'I' = infinity norm, 'F' = Frobenius norm
     function matrix_norm(A, norm_type) result(nrm)
         real(wp), intent(in) :: A(:, :)
         character(len=1), intent(in), optional :: norm_type
         real(wp) :: nrm
         character(len=1) :: norm_char
-        integer :: m, n, lda
-        real(wp), allocatable :: work(:)
+        integer :: m, n
+        real(wp), allocatable :: work(:), A_work(:, :)
+        
+        double precision, external :: dlange
         
         m = size(A, 1)
         n = size(A, 2)
-        lda = m
         
         norm_char = 'F'  ! Default: Frobenius norm
         if (present(norm_type)) norm_char = norm_type
         
-        if (norm_char == 'I') then
+        allocate(A_work(m, n))
+        A_work = A
+        
+        if (norm_char == 'I' .or. norm_char == 'i') then
             allocate(work(m))
         else
             allocate(work(1))
         end if
         
-        nrm = dlange(norm_char, m, n, A, lda, work)
+        nrm = dlange(norm_char, m, n, A_work, m, work)
         
-        deallocate(work)
+        deallocate(work, A_work)
     end function matrix_norm
     
     !> Compute matrix trace (sum of diagonal elements)
@@ -249,6 +221,8 @@ contains
         integer, allocatable :: ipiv(:)
         integer :: n, info, i, parity
         
+        external :: dgetrf
+        
         n = size(A, 1)
         
         if (size(A, 2) /= n) then
@@ -262,7 +236,7 @@ contains
         
         A_copy = A
         
-        ! LU factorisation
+        ! LU factorization with LAPACK
         call dgetrf(n, n, A_copy, n, ipiv, info)
         
         if (info /= 0) then
@@ -296,14 +270,13 @@ contains
         integer :: rnk
         
         real(wp), allocatable :: A_copy(:, :), s(:), u(:, :), vt(:, :), work(:)
-        integer :: m, n, lda, ldu, ldvt, lwork, info, i
+        integer :: m, n, lwork, info, i
         real(wp) :: tolerance
+        
+        external :: dgesvd
         
         m = size(A, 1)
         n = size(A, 2)
-        lda = m
-        ldu = m
-        ldvt = n
         lwork = max(3 * min(m, n) + max(m, n), 5 * min(m, n))
         
         tolerance = TOL_DEFAULT
@@ -318,45 +291,46 @@ contains
         A_copy = A
         
         ! Compute SVD
-        call dgesvd('A', 'A', m, n, A_copy, lda, s, u, ldu, vt, ldvt, work, lwork, info)
+        call dgesvd('A', 'A', m, n, A_copy, m, s, u, m, vt, n, work, lwork, info)
         
         ! Count singular values above tolerance
         rnk = 0
-        do i = 1, min(m, n)
-            if (s(i) > tolerance * s(1)) then
-                rnk = rnk + 1
-            end if
-        end do
+        if (info == 0) then
+            do i = 1, min(m, n)
+                if (s(i) > tolerance * s(1)) then
+                    rnk = rnk + 1
+                end if
+            end do
+        end if
         
         deallocate(A_copy, s, u, vt, work)
     end function matrix_rank
     
-    !> Compute matrix condition number (ratio of largest to smallest singular value)
+    !> Compute matrix condition number
     function matrix_condition_number(A, norm_type) result(cond)
         real(wp), intent(in) :: A(:, :)
         character(len=1), intent(in), optional :: norm_type
         real(wp) :: cond
         
-        real(wp), allocatable :: A_copy(:, :), s(:), work(:)
-        integer :: m, n, lda, lwork, info
-        character(len=1) :: norm_char
+        real(wp), allocatable :: A_copy(:, :), s(:), work(:), u(:, :), vt(:, :)
+        integer :: m, n, lwork, info
+        
+        external :: dgesvd
         
         m = size(A, 1)
         n = size(A, 2)
-        lda = m
         lwork = max(1, 3 * min(m, n) + max(m, n), 5 * min(m, n))
-        
-        norm_char = '2'  ! 2-norm (spectral norm)
-        if (present(norm_type)) norm_char = norm_type
         
         allocate(A_copy(m, n))
         allocate(s(min(m, n)))
+        allocate(u(1, 1))  ! Not computed
+        allocate(vt(1, 1)) ! Not computed
         allocate(work(lwork))
         
         A_copy = A
         
-        ! Compute singular values
-        call dgesvd('N', 'N', m, n, A_copy, lda, s, A_copy, 1, A_copy, 1, work, lwork, info)
+        ! Compute singular values only
+        call dgesvd('N', 'N', m, n, A_copy, m, s, u, 1, vt, 1, work, lwork, info)
         
         if (info == 0 .and. s(min(m, n)) > TOL_DEFAULT) then
             cond = s(1) / s(min(m, n))
@@ -364,7 +338,7 @@ contains
             cond = huge(1.0_wp)
         end if
         
-        deallocate(A_copy, s, work)
+        deallocate(A_copy, s, u, vt, work)
     end function matrix_condition_number
     
     !> Compute matrix inverse using LU decomposition
@@ -376,6 +350,8 @@ contains
         integer, allocatable :: ipiv(:)
         real(wp), allocatable :: work(:)
         integer :: n, info, lwork
+        
+        external :: dgetrf, dgetri
         
         n = size(A, 1)
         
@@ -390,7 +366,7 @@ contains
         
         Ainv = A
         
-        ! LU factorisation
+        ! LU factorization
         call dgetrf(n, n, Ainv, n, ipiv, info)
         
         if (info /= 0) then
@@ -399,7 +375,7 @@ contains
             return
         end if
         
-        ! Invert
+        ! Invert using LU
         call dgetri(n, Ainv, n, ipiv, work, lwork, info)
         
         deallocate(ipiv, work)
@@ -411,7 +387,7 @@ contains
         end if
     end subroutine matrix_inverse
     
-    !> Compute matrix power A^k using repeated squaring
+    !> Compute matrix power A^k
     function matrix_power(A, k, status) result(Ak)
         real(wp), intent(in) :: A(:, :)
         integer, intent(in) :: k
@@ -431,7 +407,6 @@ contains
         end if
         
         if (k == 0) then
-            ! Identity matrix
             Ak = 0.0_wp
             do i = 1, n
                 Ak(i, i) = 1.0_wp
@@ -491,13 +466,15 @@ contains
         sym = .true.
     end function is_symmetric
     
-    !> Check if matrix is positive definite using Cholesky
+    !> Check if matrix is positive definite
     function is_positive_definite(A) result(pd)
         real(wp), intent(in) :: A(:, :)
         logical :: pd
         
         real(wp), allocatable :: A_copy(:, :)
         integer :: n, info
+        
+        external :: dpotrf
         
         n = size(A, 1)
         pd = .false.
@@ -507,7 +484,7 @@ contains
         allocate(A_copy(n, n))
         A_copy = A
         
-        ! Try Cholesky factorisation
+        ! Try Cholesky factorization
         call dpotrf('L', n, A_copy, n, info)
         
         pd = (info == 0)
@@ -515,7 +492,7 @@ contains
         deallocate(A_copy)
     end function is_positive_definite
     
-    !> Compute outer product: C = a * b^T
+    !> Compute outer product
     pure function outer_product(a, b) result(C)
         real(wp), intent(in) :: a(:), b(:)
         real(wp) :: C(size(a), size(b))
@@ -528,7 +505,7 @@ contains
         end do
     end function outer_product
     
-    !> Compute Kronecker product: C = A ⊗ B
+    !> Compute Kronecker product
     pure function kronecker_product(A, B) result(C)
         real(wp), intent(in) :: A(:, :), B(:, :)
         real(wp) :: C(size(A, 1) * size(B, 1), size(A, 2) * size(B, 2))

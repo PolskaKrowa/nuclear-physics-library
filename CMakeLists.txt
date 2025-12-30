@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.20)
 project(NuclearPhysics VERSION 1.0.0 LANGUAGES Fortran C)
 
 # Set Fortran standards and flags
@@ -15,7 +15,7 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
 
-set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -lapack -lblas")
+set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -llapack -lopenblas")
 
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_definitions(M_PI=3.14159265358979)
@@ -28,6 +28,17 @@ endif()
 # Find BLAS/LAPACK
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+
+# If CMake didn't find them, set defaults to OpenBLAS
+if(NOT BLAS_FOUND)
+    set(BLAS_LIBRARIES "/usr/lib/libopenblas.so")
+    message(STATUS "Using OpenBLAS for BLAS: ${BLAS_LIBRARIES}")
+endif()
+
+if(NOT LAPACK_FOUND)
+    set(LAPACK_LIBRARIES "/usr/lib/libopenblas.so")
+    message(STATUS "Using OpenBLAS for LAPACK: ${LAPACK_LIBRARIES}")
+endif()
 
 # Core library
 add_subdirectory(core)
