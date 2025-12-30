@@ -64,6 +64,13 @@ program test_suite
     print *, 'Failed:       ', failed_tests
     print *, 'Success rate: ', real(passed_tests)/real(total_tests)*100.0, '%'
     print *, '========================================='
+
+    ! Exit with number of failed tests (0 if all passed)
+    if (failed_tests > 0) then
+        stop 1
+    else
+        stop 0
+    end if
     
 contains
 
