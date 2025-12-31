@@ -61,7 +61,7 @@ If you find a bug or want to request a new feature:
 
 To maintain quality:
 
-* Follow the indentation and formatting conventions you see in the existing codebase (e.g., consistent indentation, naming schemes).([GitHub][1])
+* Follow the indentation and formatting conventions you see in the existing codebase (e.g., consistent indentation, naming schemes).
 * Add comments for complex logic.
 * Write unit tests for new features where feasible.
 * Objective and clear commit messages help reviewers.
