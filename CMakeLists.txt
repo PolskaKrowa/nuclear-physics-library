@@ -15,30 +15,51 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
 
-set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -llapack -lopenblas")
+
 
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_definitions(M_PI=3.14159265358979)
 
-# Build type
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+# Option to manually specify OpenBLAS path
+set(OPENBLAS_PATH "/usr/lib/libopenblas.so" CACHE FILEPATH "Path to OpenBLAS library")
+
+# Try to find BLAS/LAPACK using CMake's built-in finders
+# First, try to explicitly use OpenBLAS
+set(BLA_VENDOR OpenBLAS)
+find_package(BLAS QUIET)
+find_package(LAPACK QUIET)
+
+# If not found, try generic search
+if(NOT BLAS_FOUND OR NOT LAPACK_FOUND)
+    set(BLA_VENDOR All)
+    find_package(BLAS QUIET)
+    find_package(LAPACK QUIET)
 endif()
 
-# Find BLAS/LAPACK
-find_package(BLAS REQUIRED)
-find_package(LAPACK REQUIRED)
-
-# If CMake didn't find them, set defaults to OpenBLAS
+# If still not found, use manual fallback to OpenBLAS
 if(NOT BLAS_FOUND)
-    set(BLAS_LIBRARIES "/usr/lib/libopenblas.so")
-    message(STATUS "Using OpenBLAS for BLAS: ${BLAS_LIBRARIES}")
+    if(EXISTS "${OPENBLAS_PATH}")
+        set(BLAS_LIBRARIES "${OPENBLAS_PATH}")
+        set(BLAS_FOUND TRUE)
+        message(STATUS "Manually set BLAS to OpenBLAS: ${BLAS_LIBRARIES}")
+    else()
+        message(FATAL_ERROR "BLAS not found! Please install OpenBLAS or set OPENBLAS_PATH")
+    endif()
 endif()
 
 if(NOT LAPACK_FOUND)
-    set(LAPACK_LIBRARIES "/usr/lib/libopenblas.so")
-    message(STATUS "Using OpenBLAS for LAPACK: ${LAPACK_LIBRARIES}")
+    if(EXISTS "${OPENBLAS_PATH}")
+        set(LAPACK_LIBRARIES "${OPENBLAS_PATH}")
+        set(LAPACK_FOUND TRUE)
+        message(STATUS "Manually set LAPACK to OpenBLAS: ${LAPACK_LIBRARIES}")
+    else()
+        message(FATAL_ERROR "LAPACK not found! Please install OpenBLAS or set OPENBLAS_PATH")
+    endif()
 endif()
+
+# Diagnostic output
+message(STATUS "BLAS libraries: ${BLAS_LIBRARIES}")
+message(STATUS "LAPACK libraries: ${LAPACK_LIBRARIES}")
 
 # Core library
 add_subdirectory(core)
