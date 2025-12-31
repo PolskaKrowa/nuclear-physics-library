@@ -62,7 +62,8 @@ contains
         call pressure_init(reactor%pressure, nx, ny, nz, dx, dy, dz, pressure_cfg)
         
         ! Start at critical (zero reactivity)
-        call fission_set_reactivity(reactor%fission, 0.0_wp)
+        call fission_set_reactivity(reactor%fission, -0.05_wp)
+        call reactor_set_control_rods(c_loc(reactor), 0.99_wp)
         
         reactor%initialized = .true.
         handle = c_loc(reactor)
@@ -169,7 +170,7 @@ contains
         ! Map insertion fraction to reactivity
         ! 0.0 = withdrawn (slightly positive for power)
         ! 1.0 = inserted (very negative)
-        reactivity = 0.001_wp + rho_worth * insertion_fraction
+        reactivity = -0.01_wp + rho_worth * insertion_fraction
         
         ! Clamp to safe bounds
         reactivity = max(-0.065_wp, min(0.002_wp, reactivity))
@@ -322,7 +323,7 @@ contains
         
         dt_heat = heat_get_max_dt(reactor%heat)
         dt_fluid = fluid_get_max_dt(reactor%fluid)
-        dt_fission = 0.01_wp  ! Typical neutronic time scale
+        dt_fission = 1.0e-6_wp  ! 1 microsecond
         
         dt_max = min(dt_heat, dt_fluid, dt_fission)
     end function reactor_get_max_dt

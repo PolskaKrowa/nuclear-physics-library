@@ -7,7 +7,7 @@ include_directories(${CMAKE_Fortran_MODULE_DIRECTORY})
 
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=f2008 -fimplicit-none -Wall -Wextra")
-    set(CMAKE_Fortran_FLAGS_DEBUG "-g -fcheck=all -fbacktrace")
+    set(CMAKE_Fortran_FLAGS_DEBUG "-O0 -g -fcheck=all -fbacktrace -fimplicit-none -fno-omit-frame-pointer -pedantic")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -march=native")
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -stand f08 -implicitnone -warn all")

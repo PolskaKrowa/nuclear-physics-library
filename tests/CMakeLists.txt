@@ -66,6 +66,7 @@ target_link_libraries(models core linalg pde)
 
 # Test executable
 add_executable(test_suite test_suite.f90)
+target_link_options(test_suite PRIVATE "-Wl,-z,noexecstack")
 target_link_libraries(test_suite 
     core 
     linalg 
