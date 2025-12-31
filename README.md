@@ -113,6 +113,14 @@ cmake -DCMAKE_BUILD_TYPE=Debug ..
 cmake -DCMAKE_Fortran_COMPILER=ifort ..
 ```
 
+In some cases, CMake will require you to manually specify the location of your BLAS and LAPACK libraries.
+You can do this by simply passing:
+```bash
+-DBLAS_LIBRARIES=/path/to/libblas.so -DLAPACK_LIBRARIES=/path/to/liblapack.so
+```
+to the CMake command.
+This program also supports compiling using OpenBLAS, which includes LAPACK in the same .so file, however both libraries must still be passed into the CMake command to ensure that the compiler is able to properly link the libraries to the program.
+
 ## Module Organisation
 
 ```
