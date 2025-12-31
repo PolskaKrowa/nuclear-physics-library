@@ -54,26 +54,7 @@ add_subdirectory(models)
 target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_physics_core)
 
 # C Interface library
-add_library(nuclear_physics_c SHARED interface/c_interface.f90)
-target_link_libraries(nuclear_physics_c 
-    nuclear_physics_models 
-    nuclear_physics_kernels 
-    nuclear_physics_core
-    ${LAPACK_LIBRARIES} 
-    ${BLAS_LIBRARIES})
-
-set_target_properties(nuclear_physics_c PROPERTIES
-    Fortran_MODULE_DIRECTORY ${CMAKE_Fortran_MODULE_DIRECTORY}
-    VERSION ${PROJECT_VERSION}
-    SOVERSION 1)
-
-# Install C interface
-install(TARGETS nuclear_physics_c
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib)
-
-install(FILES include/nuclear_physics.h
-    DESTINATION include)
+add_subdirectory(interface)
 
 # BWR Simulator example
 add_executable(bwr_simulator examples/bwr_simulator.c)
