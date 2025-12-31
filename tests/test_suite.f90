@@ -3,11 +3,45 @@
 ! Comprehensive test suite for nuclear physics simulation kernels and models
 ! Systematically tests each component and reports results
 !
+
+module test_helpers 
+    use kinds, only: wp
+    implicit none
+contains
+    ! --- ODE Helpers ---
+    pure subroutine simple_ode(t, y, dydt)
+        real(wp), intent(in) :: t, y(:)
+        real(wp), intent(out) :: dydt(:)
+        dydt(1) = -y(1)
+    end subroutine simple_ode
+    
+    subroutine stiff_ode(t, y, dydt)
+        real(wp), intent(in) :: t, y(:)
+        real(wp), intent(out) :: dydt(:)
+        dydt(1) = -100.0_wp * y(1)
+    end subroutine stiff_ode
+
+    ! --- Optimization Helpers (MOVE THESE HERE) ---
+    pure function quadratic_func(x) result(f)
+        real(wp), intent(in) :: x(:)
+        real(wp) :: f
+        f = sum(x**2)
+    end function quadratic_func
+    
+    pure function quadratic_grad(x) result(g)
+        real(wp), intent(in) :: x(:)
+        real(wp) :: g(size(x))
+        g = 2.0_wp * x
+    end function quadratic_grad
+
+end module test_helpers
+
 program test_suite
     use kinds
     use constants
     use numerics_utils
     use rng
+    use test_helpers
     use, intrinsic :: ieee_arithmetic
     implicit none
     
@@ -450,12 +484,6 @@ contains
                (abs(y_out(1, size(t_out)) - exp(-1.0_wp)) < 0.01_wp)
     end function
     
-    pure subroutine simple_ode(t, y, dydt)
-        real(wp), intent(in) :: t, y(:)
-        real(wp), intent(out) :: dydt(:)
-        dydt(1) = -y(1)
-    end subroutine
-    
     subroutine test_dormand_prince_module()
         use dormand_prince
         print *, ''
@@ -509,12 +537,6 @@ contains
         pass = (status%code == BEULER_SUCCESS) .and. all(is_finite(y_out))
     end function
     
-    subroutine stiff_ode(t, y, dydt)
-        real(wp), intent(in) :: t, y(:)
-        real(wp), intent(out) :: dydt(:)
-        dydt(1) = -100.0_wp * y(1)  ! Stiff equation
-    end subroutine
-    
     !===========================================================================
     ! OPTIMIZATION TESTS
     !===========================================================================
@@ -544,18 +566,6 @@ contains
                                        x0, xmin, config, result)
         
         pass = result%converged .and. (norm2(xmin) < 0.01_wp)
-    end function
-    
-    pure function quadratic_func(x) result(f)
-        real(wp), intent(in) :: x(:)
-        real(wp) :: f
-        f = sum(x**2)
-    end function
-    
-    pure function quadratic_grad(x) result(g)
-        real(wp), intent(in) :: x(:)
-        real(wp) :: g(size(x))
-        g = 2.0_wp * x
     end function
     
     subroutine test_conjugate_gradient_module()

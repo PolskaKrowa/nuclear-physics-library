@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(NuclearPhysicsTests Fortran)
 
 # Set Fortran standard
-set(CMAKE_Fortran_FLAGS "-g -O0 -fcheck=all -fbacktrace -Wall -Wextra -fsanitize=address -fno-omit-frame-pointer")
+set(CMAKE_Fortran_FLAGS "-g3 -O0 -fcheck=all -fbacktrace -Wall -Wextra -fsanitize=address -fno-omit-frame-pointer -fno-inline -fno-lto -fsanitize=address,undefined -fstack-protector-strong")
 
 # Set module directory
 set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/modules)
