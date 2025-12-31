@@ -10,16 +10,16 @@ Contributions follow the standard GitHub workflow:
    Click the “Fork” button in the top‑right of the repo page.
 
 2. **Clone your fork locally**  
-   ```bash
+```bash
    git clone https://github.com/PolskaKrowa/nuclear‑physics‑library.git
    cd nuclear‑physics‑library
-````
+```
 
 3. **Create a feature branch**
 
-   ```bash
-   git checkout -b feature/your‑feature‑name
-   ```
+```bash
+git checkout -b feature/your‑feature‑name
+```
 
 4. **Make your changes**
    Follow the code style conventions and add tests where appropriate.
@@ -29,9 +29,9 @@ Contributions follow the standard GitHub workflow:
 
 6. **Push to your fork**
 
-   ```bash
-   git push origin feature/your‑feature‑name
-   ```
+```bash
+git push origin feature/your‑feature‑name
+```
 
 7. **Open a Pull Request**
    Go to the original repository and click “New Pull Request”. Describe what you’ve done and why.
