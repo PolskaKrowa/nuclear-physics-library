@@ -262,22 +262,22 @@ If you use this library in your research, please cite:
 
 ### Planned Features
 - [ ] MPI parallelisation for distributed computing
-- [ ] OpenMP threading for shared-memory systems
 - [ ] Python bindings via f2py
-- [ ] Additional reactor geometries (hexagonal, cylindrical)
-- [x] Multi-group neutron diffusion
-- [ ] Advanced turbulence models
-- [x] Xenon/samarium poisoning models
-- [x] Fuel depletion and burnup tracking
+
 
 ### In Progress
-- [x] Comprehensive test suite
-- [ ] User documentation and tutorials
-- [ ] Example reactor simulations
+- [ ] Additional reactor geometries (hexagonal, cylindrical)
+- [ ] Advanced turbulence models
+- [ ] OpenMP threading for shared-memory systems
 
 ## Version History
 
-### v0.1.0 (Current)
+### v0.2.0 (current)
+- Enhanced neutronics models
+- Improved fluid dynamics simulation
+- Consistent testing suite
+
+### v0.1.0
 - Initial release
 - Core utilities and mathematical kernels
 - Basic physics models (fluid, heat, fission, pressure)
