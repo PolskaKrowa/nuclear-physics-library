@@ -1,5 +1,12 @@
+<div align="center" style="padding: 10px">
+
+<a href="">![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) </a>
+<a href="">![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library)</a>
+<a href="">![GitHub Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)</a>
+
+</div>
+
 # Nuclear Physics Library
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) ![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library) ![GitHub Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)
 
 Nuclear Physics Library is a high‑performance Fortran toolkit providing utilities, numerical solvers, and physics models to support the development of reactor simulations and multiphysics studies.
 
@@ -138,6 +145,10 @@ nuclear-physics-library/
 │   └── pde/              # PDE methods
 │
 └── models/               # Physics models
+    ├── burnup_depletion.f90
+    ├── cross_sections.f90
+    ├── multigroup_diffusion.f90
+    ├── two_phase_flow.f90
     ├── fluid_dynamics.f90
     ├── heat_transfer.f90
     ├── nuclear_fission.f90
@@ -179,11 +190,14 @@ sudo yum install gcc-gfortran cmake blas-devel lapack-devel
 
 ### Compiler Optimisation Flags
 
-For production builds, use aggressive optimisation:
+For production builds, the CMakeLists.txt file provides the following flags for aggressive optimisation:
 
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_Fortran_FLAGS="-O3 -march=native -ffast-math" ..
+GNU compiler:
+-Ofast -march=native -mtune=native -flto
+
+Intel compiler:
+-O3 -xHost
 ```
 
 ### BLAS/LAPACK Performance
@@ -248,22 +262,26 @@ If you use this library in your research, please cite:
 
 ### Planned Features
 - [ ] MPI parallelisation for distributed computing
-- [ ] OpenMP threading for shared-memory systems
 - [ ] Python bindings via f2py
-- [ ] Additional reactor geometries (hexagonal, cylindrical)
-- [ ] Multi-group neutron diffusion
-- [ ] Advanced turbulence models
-- [ ] Xenon/samarium poisoning models
-- [ ] Fuel depletion and burnup tracking
+- [ ] I/O and Visualisation (HDF5, VTK, etc.)
+- [ ] Reactor control modules
+- [ ] Material Properties database
+- [ ] Detailed fuel modelling
+- [ ] Enhanced testing suite (unit tests, benchmarks, verification tests)
 
 ### In Progress
-- [x] Comprehensive test suite
-- [ ] User documentation and tutorials
-- [ ] Example reactor simulations
+- [ ] Additional reactor geometries (hexagonal, cylindrical)
+- [ ] Advanced turbulence models
+- [ ] OpenMP threading for shared-memory systems
 
 ## Version History
 
-### v0.1.0 (Current)
+### v0.2.0 (current)
+- Enhanced neutronics models
+- Improved fluid dynamics simulation
+- Consistent testing suite
+
+### v0.1.0
 - Initial release
 - Core utilities and mathematical kernels
 - Basic physics models (fluid, heat, fission, pressure)

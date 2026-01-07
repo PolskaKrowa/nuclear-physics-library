@@ -65,6 +65,7 @@ To maintain quality:
 * Add comments for complex logic.
 * Write unit tests for new features where feasible.
 * Objective and clear commit messages help reviewers.
+* SI units where applicable (non-SI units are strongly discouraged unless absolutely necessary.)
 
 ## Communication
 
