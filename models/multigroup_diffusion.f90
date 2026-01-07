@@ -307,58 +307,98 @@ contains
         logical, intent(out) :: converged
         
         integer :: outer_iter, inner_iter, g
-        real(wp) :: k_ratio, flux_error
+        real(wp) :: k_error, flux_error
+        real(wp) :: fission_rate_new, fission_rate_old
         
         state%converged = .false.
         
-        ! Outer iteration (power iteration)
+        ! Better initial guess for k-effective
+        state%k_eff = state%config%k_guess
+        
+        ! Initialize flux if needed
+        if (maxval(state%flux) < 1.0e-10_wp) then
+            state%flux = 1.0_wp  ! Unit flux guess
+        end if
+        
+        ! Outer iteration (power iteration on k-eigenvalue)
         do outer_iter = 1, state%config%max_outer_iter
             state%outer_iterations = outer_iter
             
-            ! Store old values
+            ! Store old k-effective
             state%k_eff_old = state%k_eff
-            state%flux_old = state%flux
             
-            ! Update fission source
+            ! Compute fission source with current flux and k
             call compute_fission_source(state)
             
-            ! Inner iteration (group sweeps)
+            ! Store old flux for convergence check
+            state%flux_old = state%flux
+            
+            ! Inner iteration (multi-group fixed source solve)
             do inner_iter = 1, state%config%max_inner_iter
                 state%inner_iterations = inner_iter
                 
-                ! Sweep through all energy groups
+                ! Solve each group with Gauss-Seidel sweep
                 do g = 1, state%n_groups
                     call solve_group_equation(state, g)
                 end do
                 
-                ! Check inner convergence
-                flux_error = compute_flux_error(state)
-                state%inner_error = flux_error
+                ! Check inner convergence (flux change)
+                flux_error = maxval(abs(state%flux - state%flux_old)) / &
+                            (maxval(abs(state%flux)) + 1.0e-30_wp)
                 
                 if (flux_error < state%config%inner_tolerance) exit
+                
+                ! Update old flux for next inner iteration
+                state%flux_old = state%flux
             end do
             
-            ! Update k-effective
-            call update_keff(state)
+            ! Compute new fission rate
+            fission_rate_new = sum(state%fission_source)
             
-            ! Normalize flux
-            call normalize_flux(state)
+            ! Compute old fission rate (with old k)
+            call compute_fission_source_with_flux(state, state%flux_old, fission_rate_old)
             
-            ! Check outer convergence
-            k_ratio = abs(state%k_eff - state%k_eff_old) / state%k_eff
-            state%outer_error = k_ratio
+            ! Update k-effective using fission rate ratio
+            if (fission_rate_old > TOL_DEFAULT) then
+                state%k_eff = state%k_eff_old * (fission_rate_new / fission_rate_old)
+            end if
             
-            if (k_ratio < state%config%outer_tolerance) then
+            ! Normalize flux to maintain consistent scale
+            call normalize_flux_to_unity(state)
+            
+            ! Check outer convergence on k-effective
+            k_error = abs(state%k_eff - state%k_eff_old) / state%k_eff
+            state%outer_error = k_error
+            
+            ! Print progress
+            if (mod(outer_iter, 10) == 0) then
+                print '(A,I4,A,F12.8,A,ES10.2)', &
+                    'Iter ', outer_iter, ': k_eff = ', state%k_eff, &
+                    ', error = ', k_error
+            end if
+            
+            if (k_error < state%config%outer_tolerance) then
                 state%converged = .true.
                 exit
             end if
         end do
+        
+        ! Final flux normalization to power level
+        if (state%config%normalize_power) then
+            call normalize_flux(state)
+        end if
         
         ! Compute power distribution
         call compute_power_distribution(state)
         
         k_eff = state%k_eff
         converged = state%converged
+        
+        if (.not. converged) then
+            print '(A)', 'WARNING: Eigenvalue solver did not converge!'
+            print '(A,I4,A,ES10.2)', '  Final iteration: ', outer_iter, &
+                                    ', error: ', k_error
+        end if
     end subroutine mg_solve_eigenvalue
     
     !> Solve fixed source problem
@@ -399,21 +439,38 @@ contains
         integer, intent(in) :: g
         
         integer :: i, j, k, gp
-        real(wp) :: source, inscatter, fission, D, sigma_r
-        real(wp) :: laplacian, phi_new
+        real(wp) :: source, inscatter, outscatter, fission, D, sigma_a
+        real(wp) :: phi_c, phi_xp, phi_xm, phi_yp, phi_ym, phi_zp, phi_zm
+        real(wp) :: coef_c, coef_x, coef_y, coef_z, rhs
+        real(wp) :: inv_dx2, inv_dy2, inv_dz2
         
-        ! Sweep over spatial mesh
+        inv_dx2 = 1.0_wp / (state%dx * state%dx)
+        inv_dy2 = 1.0_wp / (state%dy * state%dy)
+        inv_dz2 = 1.0_wp / (state%dz * state%dz)
+        
+        ! Gauss-Seidel sweep (use updated values immediately)
         do k = 2, state%nz - 1
             do j = 2, state%ny - 1
                 do i = 2, state%nx - 1
                     
                     D = state%xsec(i, j, k)%D(g)
-                    sigma_r = state%xsec(i, j, k)%sigma_r(g)
+                    sigma_a = state%xsec(i, j, k)%sigma_a(g)
                     
-                    ! Compute Laplacian
-                    laplacian = compute_laplacian(state, i, j, k, g)
+                    ! Get neighbor fluxes (use most recent values - Gauss-Seidel)
+                    phi_xm = state%flux(i-1, j, k, g)
+                    phi_xp = state%flux(i+1, j, k, g)
+                    phi_ym = state%flux(i, j-1, k, g)
+                    phi_yp = state%flux(i, j+1, k, g)
+                    phi_zm = state%flux(i, j, k-1, g)
+                    phi_zp = state%flux(i, j, k+1, g)
                     
-                    ! In-scattering from other groups
+                    ! Diffusion operator coefficients
+                    coef_x = D * inv_dx2
+                    coef_y = D * inv_dy2
+                    coef_z = D * inv_dz2
+                    coef_c = 2.0_wp * (coef_x + coef_y + coef_z)
+                    
+                    ! In-scattering from other groups (use latest flux)
                     inscatter = 0.0_wp
                     do gp = 1, state%n_groups
                         if (gp /= g) then
@@ -422,22 +479,31 @@ contains
                         end if
                     end do
                     
+                    ! Out-scattering from this group
+                    outscatter = 0.0_wp
+                    do gp = 1, state%n_groups
+                        if (gp /= g) then
+                            outscatter = outscatter + state%xsec(i, j, k)%sigma_s(g, gp)
+                        end if
+                    end do
+                    
                     ! Fission source
-                    fission = state%xsec(i, j, k)%chi(g) * state%fission_source(i, j, k) / state%k_eff
+                    fission = state%xsec(i, j, k)%chi(g) * &
+                            state%fission_source(i, j, k) / state%k_eff
                     
                     ! Total source
                     source = inscatter + fission + state%external_source(i, j, k, g)
                     
-                    ! Update flux: D·∇²φ - Σ_r·φ + S = 0
-                    ! φ_new = (D·∇²φ + S) / Σ_r
-                    phi_new = (D * laplacian + source) / sigma_r
+                    ! Right-hand side
+                    rhs = coef_x * (phi_xm + phi_xp) + &
+                        coef_y * (phi_ym + phi_yp) + &
+                        coef_z * (phi_zm + phi_zp) + source
                     
-                    ! Relaxation (under-relaxation for stability)
-                    state%flux(i, j, k, g) = 0.7_wp * phi_new + &
-                                              0.3_wp * state%flux(i, j, k, g)
+                    ! Solve for new flux: (coef_c + sigma_a + outscatter) * phi = rhs
+                    state%flux(i, j, k, g) = rhs / (coef_c + sigma_a + outscatter)
                     
                     ! Ensure positive
-                    state%flux(i, j, k, g) = max(state%flux(i, j, k, g), 0.0_wp)
+                    state%flux(i, j, k, g) = max(state%flux(i, j, k, g), 1.0e-20_wp)
                 end do
             end do
         end do
@@ -496,7 +562,46 @@ contains
             end do
         end do
     end subroutine compute_fission_source
-    
+
+    !> Compute fission source with given flux
+    subroutine compute_fission_source_with_flux(state, flux, total_fission)
+        type(mg_state_t), intent(in) :: state
+        real(wp), intent(in) :: flux(:, :, :, :)
+        real(wp), intent(out) :: total_fission
+        
+        integer :: i, j, k, g
+        real(wp) :: fission
+        
+        total_fission = 0.0_wp
+        
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx
+                    fission = 0.0_wp
+                    do g = 1, state%n_groups
+                        fission = fission + state%xsec(i, j, k)%nu_sigma_f(g) * &
+                                        flux(i, j, k, g)
+                    end do
+                    total_fission = total_fission + fission
+                end do
+            end do
+        end do
+    end subroutine compute_fission_source_with_flux
+
+    !> Normalize flux to unit fission source
+    subroutine normalize_flux_to_unity(state)
+        type(mg_state_t), intent(inout) :: state
+        
+        real(wp) :: total_fission
+        
+        total_fission = sum(state%fission_source)
+        
+        if (total_fission > TOL_DEFAULT) then
+            state%flux = state%flux / sqrt(total_fission)
+            state%fission_source = state%fission_source / total_fission
+        end if
+    end subroutine normalize_flux_to_unity
+
     !> Update k-effective
     subroutine update_keff(state)
         type(mg_state_t), intent(inout) :: state
