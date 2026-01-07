@@ -190,11 +190,14 @@ sudo yum install gcc-gfortran cmake blas-devel lapack-devel
 
 ### Compiler Optimisation Flags
 
-For production builds, use aggressive optimisation:
+For production builds, the CMakeLists.txt file provides the following flags for aggressive optimisation:
 
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_Fortran_FLAGS="-O3 -march=native -ffast-math" ..
+GNU compiler:
+-Ofast -march=native -mtune=native -flto
+
+Intel compiler:
+-O3 -xHost
 ```
 
 ### BLAS/LAPACK Performance
