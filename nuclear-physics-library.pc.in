@@ -6,5 +6,5 @@ includedir=${prefix}/include
 Name: NuclearPhysicsLibrary
 Description: A library for nuclear reactor simulations
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -lnuclear_physics_kernels -lnuclear_physics_core
+Libs: -L${libdir} -lnuclear_physics_kernels -lnuclear_physics_core -lnuclear_physics_models
 Cflags: -I${includedir}
