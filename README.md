@@ -1,7 +1,5 @@
 # Nuclear Physics Library
-<div align="center">
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) ![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library) ![GitHub Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)
-</div>
 
 Nuclear Physics Library is a high‑performance Fortran toolkit providing utilities, numerical solvers, and physics models to support the development of reactor simulations and multiphysics studies.
 
