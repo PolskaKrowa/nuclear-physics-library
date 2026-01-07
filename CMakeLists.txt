@@ -77,14 +77,17 @@ target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_phy
 # C Interface library
 add_subdirectory(interface)
 
-# BWR Simulator example
-add_executable(bwr_simulator examples/bwr_simulator.c)
-target_link_libraries(bwr_simulator nuclear_physics_c m)
-target_include_directories(bwr_simulator PRIVATE include)
+# BWR Core Simulator
+add_executable(bwr_core_simulator examples/bwr_core_simulator.f90)
+target_link_libraries(bwr_core_simulator 
+    nuclear_physics_models 
+    nuclear_physics_kernels 
+    nuclear_physics_core
+    ${LAPACK_LIBRARIES} 
+    ${BLAS_LIBRARIES})
+target_include_directories(bwr_core_simulator PRIVATE include)
 
-# Install example
-install(TARGETS bwr_simulator
-    RUNTIME DESTINATION bin)
+install(TARGETS bwr_core_simulator RUNTIME DESTINATION bin)
 
 # Export configuration
 install(EXPORT NuclearPhysicsTargets
@@ -127,6 +130,6 @@ message(STATUS "    - nuclear_physics_models")
 message(STATUS "    - nuclear_physics_c (C interface)")
 message(STATUS "")
 message(STATUS "  Examples:")
-message(STATUS "    - bwr_simulator (Boiling Water Reactor)")
+message(STATUS "    - bwr_core_simulator (Boiling Water Reactor)")
 message(STATUS "═══════════════════════════════════════════════════════")
 message(STATUS "")
