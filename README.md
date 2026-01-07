@@ -1,4 +1,4 @@
-<div align="center" style="font-size: 20px">
+<div align="center" style="padding: 10px">
 
 <a href="">![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) </a>
 <a href="">![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library)</a>
