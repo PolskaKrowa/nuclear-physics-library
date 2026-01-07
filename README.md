@@ -265,10 +265,10 @@ If you use this library in your research, please cite:
 - [ ] OpenMP threading for shared-memory systems
 - [ ] Python bindings via f2py
 - [ ] Additional reactor geometries (hexagonal, cylindrical)
-- [ ] Multi-group neutron diffusion
+- [x] Multi-group neutron diffusion
 - [ ] Advanced turbulence models
-- [ ] Xenon/samarium poisoning models
-- [ ] Fuel depletion and burnup tracking
+- [x] Xenon/samarium poisoning models
+- [x] Fuel depletion and burnup tracking
 
 ### In Progress
 - [x] Comprehensive test suite
