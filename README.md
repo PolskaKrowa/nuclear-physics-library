@@ -138,6 +138,10 @@ nuclear-physics-library/
 │   └── pde/              # PDE methods
 │
 └── models/               # Physics models
+    ├── burnup_depletion.f90
+    ├── cross_sections.f90
+    ├── multigroup_diffusion.f90
+    ├── two_phase_flow.f90
     ├── fluid_dynamics.f90
     ├── heat_transfer.f90
     ├── nuclear_fission.f90
