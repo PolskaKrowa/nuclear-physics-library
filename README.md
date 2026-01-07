@@ -263,7 +263,11 @@ If you use this library in your research, please cite:
 ### Planned Features
 - [ ] MPI parallelisation for distributed computing
 - [ ] Python bindings via f2py
-
+- [ ] I/O and Visualisation (HDF5, VTK, etc.)
+- [ ] Reactor control modules
+- [ ] Material Properties database
+- [ ] Detailed fuel modelling
+- [ ] Enhanced testing suite (unit tests, benchmarks, verification tests)
 
 ### In Progress
 - [ ] Additional reactor geometries (hexagonal, cylindrical)
