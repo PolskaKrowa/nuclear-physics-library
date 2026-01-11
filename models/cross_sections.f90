@@ -118,13 +118,53 @@ contains
         
         ! UO2 fuel at 3.5% enrichment (2-group)
         if (library%n_groups == 2) then
-            call xslib_create_two_group_fuel(mat, enrichment=0.035_wp)
+            ! Initialize the material structure
             mat%name = "UO2_35"
+            mat%n_groups = 2
+            mat%is_fuel = .true.
+            mat%enrichment = 0.035_wp
+            mat%T_ref = 900.0_wp
+            mat%rho_ref = 10.97_wp  ! UO2 density g/cm³
+            
+            ! Create the base cross-sections - pass xsec_base, not mat
+            call xslib_create_two_group_fuel(mat%xsec_base, enrichment=0.035_wp)
+            
+            ! Allocate feedback coefficients
+            allocate(mat%alpha_D(2))
+            allocate(mat%alpha_mod(2))
+            allocate(mat%alpha_rho(2))
+            allocate(mat%alpha_void(2))
+            
+            ! Set typical feedback coefficients for UO2
+            mat%alpha_D = [-2.0e-5_wp, -3.0e-5_wp]  ! Doppler (pcm/K)
+            mat%alpha_mod = [0.0_wp, 0.0_wp]        ! Not applicable for fuel
+            mat%alpha_rho = [0.0_wp, 0.0_wp]        ! Not applicable for fuel
+            mat%alpha_void = [0.0_wp, 0.0_wp]       ! Not applicable for fuel
+            
             call xslib_add_material(library, mat)
             
             ! Water moderator
-            call xslib_create_two_group_moderator(mat)
             mat%name = "H2O"
+            mat%n_groups = 2
+            mat%is_fuel = .false.
+            mat%T_ref = 560.0_wp    ! ~287°C
+            mat%rho_ref = 0.74_wp   ! Water density at 7 MPa, 287°C
+            
+            ! Create the base cross-sections - pass xsec_base, not mat
+            call xslib_create_two_group_moderator(mat%xsec_base)
+            
+            ! Allocate feedback coefficients
+            if (.not. allocated(mat%alpha_D)) allocate(mat%alpha_D(2))
+            if (.not. allocated(mat%alpha_mod)) allocate(mat%alpha_mod(2))
+            if (.not. allocated(mat%alpha_rho)) allocate(mat%alpha_rho(2))
+            if (.not. allocated(mat%alpha_void)) allocate(mat%alpha_void(2))
+            
+            ! Set typical feedback coefficients for water
+            mat%alpha_D = [0.0_wp, 0.0_wp]          ! Not applicable for moderator
+            mat%alpha_mod = [0.0_wp, 1.0e-4_wp]     ! Temperature effect (pcm/K)
+            mat%alpha_rho = [-10.0_wp, -50.0_wp]    ! Density effect (pcm/(g/cm³))
+            mat%alpha_void = [-10.0_wp, -100.0_wp]  ! Void effect (pcm/% void)
+            
             call xslib_add_material(library, mat)
         end if
     end subroutine add_default_materials
@@ -385,137 +425,121 @@ contains
         end do
     end subroutine apply_burnup_effects
     
-    !> Create 2-group fuel cross sections
-    subroutine xslib_create_two_group_fuel(mat, enrichment)
-        type(xsec_material_t), intent(out) :: mat
+    subroutine xslib_create_two_group_fuel(xsec_fuel, enrichment)
+        type(mg_xsec_t), intent(out) :: xsec_fuel
         real(wp), intent(in), optional :: enrichment
         
-        real(wp) :: enrich
+        real(wp) :: enrich, scale_fast, scale_thermal
+        real(wp), parameter :: NU_U235 = 2.43_wp  ! Average neutrons per fission
         
-        enrich = 0.035_wp
+        enrich = 0.035_wp  ! Default 3.5%
         if (present(enrichment)) enrich = enrichment
         
-        mat%name = "UO2_fuel"
-        mat%n_groups = 2
-        mat%is_fuel = .true.
-        mat%enrichment = enrich
-        mat%T_ref = 900.0_wp
+        ! Enrichment scaling factors (relative to 3.5%)
+        scale_fast = enrich / 0.035_wp
+        scale_thermal = enrich / 0.035_wp
         
-        ! Allocate base cross sections
-        mat%xsec_base%n_groups = 2
-        allocate(mat%xsec_base%D(2))
-        allocate(mat%xsec_base%sigma_t(2))
-        allocate(mat%xsec_base%sigma_a(2))
-        allocate(mat%xsec_base%sigma_f(2))
-        allocate(mat%xsec_base%nu_sigma_f(2))
-        allocate(mat%xsec_base%sigma_r(2))
-        allocate(mat%xsec_base%chi(2))
-        allocate(mat%xsec_base%kappa(2))
-        allocate(mat%xsec_base%sigma_s(2, 2))
-        allocate(mat%xsec_base%chi_d(2))
+        xsec_fuel%n_groups = 2
         
-        ! Typical 2-group constants for LEU fuel (3.5% enrichment)
-        ! Group 1: Fast (10 eV - 10 MeV)
-        ! Group 2: Thermal (0 - 10 eV)
+        allocate(xsec_fuel%D(2))
+        allocate(xsec_fuel%sigma_t(2))
+        allocate(xsec_fuel%sigma_a(2))
+        allocate(xsec_fuel%sigma_f(2))
+        allocate(xsec_fuel%nu_sigma_f(2))
+        allocate(xsec_fuel%sigma_r(2))
+        allocate(xsec_fuel%chi(2))
+        allocate(xsec_fuel%kappa(2))
+        allocate(xsec_fuel%sigma_s(2, 2))
+        allocate(xsec_fuel%chi_d(2))
         
-        ! Diffusion coefficient [cm]
-        mat%xsec_base%D(1) = 1.5_wp
-        mat%xsec_base%D(2) = 0.4_wp
+        ! ========================================================================
+        ! REALISTIC BWR FUEL (UO2 3.5%, homogenized fuel pin cell)
+        ! These are typical values from lattice physics codes
+        ! Key: nu*sigma_f = NU_U235 * sigma_f (keep nu constant!)
+        ! ========================================================================
         
-        ! Absorption [cm⁻¹]
-        mat%xsec_base%sigma_a(1) = 0.010_wp * (enrich / 0.035_wp)
-        mat%xsec_base%sigma_a(2) = 0.085_wp * (enrich / 0.035_wp)
+        ! Group 1: Fast (> 0.625 eV)
+        xsec_fuel%D(1) = 1.268_wp                           ! Diffusion coefficient [cm]
+        xsec_fuel%sigma_a(1) = 0.0103_wp                    ! Absorption [cm^-1]
+        xsec_fuel%sigma_f(1) = 0.0027_wp * scale_fast       ! Fission [cm^-1]
+        xsec_fuel%nu_sigma_f(1) = NU_U235 * xsec_fuel%sigma_f(1)  ! Production (nu=2.43)
+        xsec_fuel%chi(1) = 1.0_wp                           ! All fission neutrons born fast
+        xsec_fuel%kappa(1) = 200.0_wp                       ! Energy per fission [MeV]
         
-        ! Fission [cm⁻¹]
-        mat%xsec_base%sigma_f(1) = 0.004_wp * (enrich / 0.035_wp)
-        mat%xsec_base%sigma_f(2) = 0.065_wp * (enrich / 0.035_wp)
+        ! Group 2: Thermal (< 0.625 eV)  
+        xsec_fuel%D(2) = 0.3543_wp                          ! Diffusion coefficient [cm]
+        xsec_fuel%sigma_a(2) = 0.0963_wp                    ! Absorption
+        xsec_fuel%sigma_f(2) = 0.0654_wp * scale_thermal    ! Fission
+        xsec_fuel%nu_sigma_f(2) = NU_U235 * xsec_fuel%sigma_f(2)  ! Production (nu=2.43)
+        xsec_fuel%chi(2) = 0.0_wp                           ! No thermal fission neutrons
+        xsec_fuel%kappa(2) = 200.0_wp
         
-        ! Production
-        mat%xsec_base%nu_sigma_f(1) = 0.010_wp * (enrich / 0.035_wp)
-        mat%xsec_base%nu_sigma_f(2) = 0.158_wp * (enrich / 0.035_wp)
+        ! Scattering matrix (from -> to) [cm^-1]
+        xsec_fuel%sigma_s(1,1) = 0.0244_wp  ! Fast -> Fast (within-group)
+        xsec_fuel%sigma_s(1,2) = 0.0186_wp  ! Fast -> Thermal (moderation/slowing down)
+        xsec_fuel%sigma_s(2,1) = 0.0_wp     ! Thermal -> Fast (no upscatter)
+        xsec_fuel%sigma_s(2,2) = 0.452_wp   ! Thermal -> Thermal
         
-        ! Scattering matrix [cm⁻¹]
-        mat%xsec_base%sigma_s(1, 1) = 0.30_wp   ! Fast → Fast
-        mat%xsec_base%sigma_s(1, 2) = 0.020_wp  ! Fast → Thermal (slowing down)
-        mat%xsec_base%sigma_s(2, 1) = 0.0_wp    ! Thermal → Fast (no upscatter for fuel)
-        mat%xsec_base%sigma_s(2, 2) = 0.90_wp   ! Thermal → Thermal
+        ! Compute removal cross-section: Σ_r = Σ_a + Σ_scatter-out
+        xsec_fuel%sigma_r(1) = xsec_fuel%sigma_a(1) + xsec_fuel%sigma_s(1,2)
+        xsec_fuel%sigma_r(2) = xsec_fuel%sigma_a(2) + xsec_fuel%sigma_s(2,1)
         
-        ! Removal
-        mat%xsec_base%sigma_r(1) = mat%xsec_base%sigma_a(1) + mat%xsec_base%sigma_s(1, 2)
-        mat%xsec_base%sigma_r(2) = mat%xsec_base%sigma_a(2)
+        ! Total cross-section
+        xsec_fuel%sigma_t(1) = xsec_fuel%sigma_a(1) + sum(xsec_fuel%sigma_s(1,:))
+        xsec_fuel%sigma_t(2) = xsec_fuel%sigma_a(2) + sum(xsec_fuel%sigma_s(2,:))
         
-        ! Fission spectrum
-        mat%xsec_base%chi(1) = 1.0_wp
-        mat%xsec_base%chi(2) = 0.0_wp
-        
-        ! Energy per fission [MeV]
-        mat%xsec_base%kappa(1) = 200.0_wp
-        mat%xsec_base%kappa(2) = 200.0_wp
-        
-        ! Delayed neutron spectrum (similar to prompt)
-        mat%xsec_base%chi_d(1) = 1.0_wp
-        mat%xsec_base%chi_d(2) = 0.0_wp
-        
-        ! Allocate feedback coefficients
-        allocate(mat%alpha_D(2))
-        mat%alpha_D(1) = -1.5_wp  ! pcm/K (fast Doppler)
-        mat%alpha_D(2) = -3.0_wp  ! pcm/K (thermal Doppler)
+        xsec_fuel%chi_d = xsec_fuel%chi
     end subroutine xslib_create_two_group_fuel
-    
-    !> Create 2-group moderator cross sections
-    subroutine xslib_create_two_group_moderator(mat)
-        type(xsec_material_t), intent(out) :: mat
+
+    subroutine xslib_create_two_group_moderator(xsec_water)
+        type(mg_xsec_t), intent(out) :: xsec_water
         
-        mat%name = "H2O_moderator"
-        mat%n_groups = 2
-        mat%is_fuel = .false.
-        mat%rho_ref = 0.7_wp  ! g/cm³ at operating conditions
+        xsec_water%n_groups = 2
         
-        ! Allocate
-        mat%xsec_base%n_groups = 2
-        allocate(mat%xsec_base%D(2))
-        allocate(mat%xsec_base%sigma_t(2))
-        allocate(mat%xsec_base%sigma_a(2))
-        allocate(mat%xsec_base%sigma_f(2))
-        allocate(mat%xsec_base%nu_sigma_f(2))
-        allocate(mat%xsec_base%sigma_r(2))
-        allocate(mat%xsec_base%chi(2))
-        allocate(mat%xsec_base%kappa(2))
-        allocate(mat%xsec_base%sigma_s(2, 2))
-        allocate(mat%xsec_base%chi_d(2))
+        allocate(xsec_water%D(2))
+        allocate(xsec_water%sigma_t(2))
+        allocate(xsec_water%sigma_a(2))
+        allocate(xsec_water%sigma_f(2))
+        allocate(xsec_water%nu_sigma_f(2))
+        allocate(xsec_water%sigma_r(2))
+        allocate(xsec_water%chi(2))
+        allocate(xsec_water%kappa(2))
+        allocate(xsec_water%sigma_s(2, 2))
+        allocate(xsec_water%chi_d(2))
         
-        ! Water (non-multiplying)
-        mat%xsec_base%D(1) = 1.2_wp
-        mat%xsec_base%D(2) = 0.16_wp
+        ! ========================================================================
+        ! REALISTIC WATER/MODERATOR (at BWR conditions: 7 MPa, ~280°C)
+        ! ========================================================================
         
-        mat%xsec_base%sigma_a(1) = 0.0008_wp
-        mat%xsec_base%sigma_a(2) = 0.0020_wp
+        ! Group 1: Fast
+        xsec_water%D(1) = 1.592_wp               ! Diffusion coefficient [cm]
+        xsec_water%sigma_a(1) = 0.000311_wp      ! Very low fast absorption
         
-        mat%xsec_base%sigma_f = 0.0_wp
-        mat%xsec_base%nu_sigma_f = 0.0_wp
+        ! Group 2: Thermal  
+        xsec_water%D(2) = 0.2772_wp              ! Lower D in thermal
+        xsec_water%sigma_a(2) = 0.0221_wp        ! Thermal absorption (H capture)
         
-        ! Strong scattering (H-1)
-        mat%xsec_base%sigma_s(1, 1) = 0.50_wp
-        mat%xsec_base%sigma_s(1, 2) = 0.10_wp   ! Moderation
-        mat%xsec_base%sigma_s(2, 1) = 0.001_wp  ! Small upscatter
-        mat%xsec_base%sigma_s(2, 2) = 1.50_wp
+        ! No fission in moderator
+        xsec_water%sigma_f = 0.0_wp
+        xsec_water%nu_sigma_f = 0.0_wp
+        xsec_water%chi = 0.0_wp
+        xsec_water%kappa = 0.0_wp
         
-        mat%xsec_base%sigma_r(1) = mat%xsec_base%sigma_a(1) + mat%xsec_base%sigma_s(1, 2)
-        mat%xsec_base%sigma_r(2) = mat%xsec_base%sigma_a(2) + mat%xsec_base%sigma_s(2, 1)
+        ! Strong scattering (water is excellent moderator)
+        xsec_water%sigma_s(1,1) = 0.0571_wp  ! Fast -> Fast
+        xsec_water%sigma_s(1,2) = 0.5408_wp  ! Fast -> Thermal (STRONG moderation)
+        xsec_water%sigma_s(2,1) = 0.0_wp     ! Thermal -> Fast
+        xsec_water%sigma_s(2,2) = 1.6970_wp  ! Thermal -> Thermal (strong scattering)
         
-        mat%xsec_base%chi = 0.0_wp
-        mat%xsec_base%kappa = 0.0_wp
-        mat%xsec_base%chi_d = 0.0_wp
+        ! Removal cross-section
+        xsec_water%sigma_r(1) = xsec_water%sigma_a(1) + xsec_water%sigma_s(1,2)
+        xsec_water%sigma_r(2) = xsec_water%sigma_a(2)
         
-        ! Moderator feedback
-        allocate(mat%alpha_mod(2))
-        allocate(mat%alpha_rho(2))
+        ! Total cross-section
+        xsec_water%sigma_t(1) = xsec_water%sigma_a(1) + sum(xsec_water%sigma_s(1,:))
+        xsec_water%sigma_t(2) = xsec_water%sigma_a(2) + sum(xsec_water%sigma_s(2,:))
         
-        mat%alpha_mod(1) = 0.0_wp
-        mat%alpha_mod(2) = 1.0e-4_wp  ! Small positive (spectral hardening)
-        
-        mat%alpha_rho(1) = 50.0_wp    ! pcm/(g/cm³) - positive
-        mat%alpha_rho(2) = 80.0_wp
+        xsec_water%chi_d = 0.0_wp
     end subroutine xslib_create_two_group_moderator
     
     !> Compute Doppler coefficient

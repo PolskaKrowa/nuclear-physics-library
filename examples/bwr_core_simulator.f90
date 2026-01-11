@@ -196,11 +196,51 @@ contains
         call xslib_init(sim%xslib, n_groups=2)
         
         ! Create fuel cross sections (3.5% enriched UO2)
-        call xslib_create_two_group_fuel(xsec_fuel, enrichment=0.035_wp)
+        ! FIX: Initialize the material structure first
+        xsec_fuel%name = "UO2_35"
+        xsec_fuel%n_groups = 2
+        xsec_fuel%is_fuel = .true.
+        xsec_fuel%enrichment = 0.035_wp
+        xsec_fuel%T_ref = 900.0_wp
+        xsec_fuel%rho_ref = 10.97_wp
+        
+        ! FIX: Pass xsec_base component, not the entire material
+        call xslib_create_two_group_fuel(xsec_fuel%xsec_base, enrichment=0.035_wp)
+        
+        ! Allocate feedback coefficients
+        allocate(xsec_fuel%alpha_D(2))
+        allocate(xsec_fuel%alpha_mod(2))
+        allocate(xsec_fuel%alpha_rho(2))
+        allocate(xsec_fuel%alpha_void(2))
+        
+        xsec_fuel%alpha_D = [-2.0e-5_wp, -3.0e-5_wp]
+        xsec_fuel%alpha_mod = [0.0_wp, 0.0_wp]
+        xsec_fuel%alpha_rho = [0.0_wp, 0.0_wp]
+        xsec_fuel%alpha_void = [0.0_wp, 0.0_wp]
+        
         call xslib_add_material(sim%xslib, xsec_fuel)
         
         ! Create water/steam cross sections
-        call xslib_create_two_group_moderator(xsec_water)
+        xsec_water%name = "H2O"
+        xsec_water%n_groups = 2
+        xsec_water%is_fuel = .false.
+        xsec_water%T_ref = 560.0_wp
+        xsec_water%rho_ref = 0.74_wp
+        
+        ! FIX: Pass xsec_base component, not the entire material
+        call xslib_create_two_group_moderator(xsec_water%xsec_base)
+        
+        ! Allocate feedback coefficients
+        allocate(xsec_water%alpha_D(2))
+        allocate(xsec_water%alpha_mod(2))
+        allocate(xsec_water%alpha_rho(2))
+        allocate(xsec_water%alpha_void(2))
+        
+        xsec_water%alpha_D = [0.0_wp, 0.0_wp]
+        xsec_water%alpha_mod = [0.0_wp, 1.0e-4_wp]
+        xsec_water%alpha_rho = [-10.0_wp, -50.0_wp]
+        xsec_water%alpha_void = [-10.0_wp, -100.0_wp]
+        
         call xslib_add_material(sim%xslib, xsec_water)
         
         ! 2. Neutronics (2-group diffusion)
@@ -214,18 +254,23 @@ contains
                     sim%dx, sim%dy, sim%dz, neutron_config)
         
         ! Set fuel region (cylindrical core)
-        r_fuel = 0.45_wp * sim%core_diameter  ! 90% of diameter
-        r_water = 0.5_wp * sim%core_diameter
+        r_fuel = 0.35_wp * sim%core_diameter  ! ~50% of area = fuel
+        r_water = 0.5_wp * sim%core_diameter ! outer 50% = reflector
         
         do k = 1, sim%nz
             do j = 1, sim%ny
                 do i = 1, sim%nx
-                    r = sqrt((i - sim%nx/2.0_wp)**2 + (j - sim%ny/2.0_wp)**2) * sim%dx
+                    r = sqrt((real(i,wp) - real(sim%nx,wp)/2.0_wp)**2 + &
+                            (real(j,wp) - real(sim%ny,wp)/2.0_wp)**2) * sim%dx
                     
                     if (r < r_fuel) then
-                        call mg_set_cross_sections(sim%neutronics, xsec_fuel%xsec_base, i, i, j, j, k, k)
+                        ! Inside core - use fuel
+                        call mg_set_cross_sections(sim%neutronics, xsec_fuel%xsec_base, &
+                            i, i, j, j, k, k)
                     else
-                        call mg_set_cross_sections(sim%neutronics, xsec_water%xsec_base, i, i, j, j, k, k)
+                        ! Outside core - use water reflector
+                        call mg_set_cross_sections(sim%neutronics, xsec_water%xsec_base, &
+                            i, i, j, j, k, k)
                     end if
                 end do
             end do
@@ -277,69 +322,6 @@ contains
         print *, ""
     end subroutine setup_bwr_simulation
     
-    !> Solve for initial steady state
-    subroutine solve_steady_state(sim)
-        type(simulation_t), intent(inout) :: sim
-        
-        integer :: iter
-        real(wp) :: power(sim%nx, sim%ny, sim%nz)
-        real(wp) :: temperature(sim%nx, sim%ny, sim%nz)
-        real(wp) :: density(sim%nx, sim%ny, sim%nz)
-        real(wp) :: error
-        
-        ! Iterative coupling for steady state
-        do iter = 1, 50
-            ! 1. Solve neutronics with current T, ρ
-            call mg_solve_eigenvalue(sim%neutronics, sim%k_eff, converged)
-            
-            if (.not. converged) then
-                print *, "Warning: Neutronics did not converge"
-            end if
-            
-            ! 2. Get power distribution
-            call mg_get_power(sim%neutronics, power)
-            sim%power_current = sim%neutronics%total_power
-            
-            ! 3. Solve heat transfer
-            sim%heat%q = power
-            call heat_step(sim%heat, 1.0_wp)  ! Large pseudo-timestep
-            
-            temperature = sim%heat%T
-            sim%max_fuel_temp = maxval(temperature)
-            
-            ! 4. Solve two-phase flow
-            density = 738.0_wp  ! Simplified
-            call two_phase_step(sim%thermalhydraulics, &
-                temperature, sim%pressure_operating * sim%heat%T / sim%heat%T, &
-                sim%mass_flux_core * sim%heat%T / sim%heat%T, &
-                power / (sim%dx * sim%dy), 1.0_wp)
-            
-            ! Get void fraction
-            call two_phase_get_void_fraction(sim%thermalhydraulics, density)
-            sim%avg_void_fraction = sum(density) / size(density) * 100.0_wp
-            sim%max_void_fraction = maxval(density) * 100.0_wp
-            
-            ! 5. Update cross sections with feedback
-            call update_cross_sections_feedback(sim, temperature, density)
-            
-            ! Check convergence
-            error = abs(sim%k_eff - 1.0_wp) + &
-                   abs(sim%power_current - sim%power_rated) / sim%power_rated
-            
-            if (mod(iter, 10) == 0) then
-                print *, "  Iteration", iter, ": k_eff =", sim%k_eff, &
-                        ", error =", error
-            end if
-            
-            if (error < 1.0e-4_wp) exit
-        end do
-        
-        ! Final calculations
-        sim%reactivity_pcm = (sim%k_eff - 1.0_wp) / sim%k_eff * 1.0e5_wp
-        sim%min_chfr = minval(sim%thermalhydraulics%chf_ratio)
-        
-    end subroutine solve_steady_state
-    
     !> Coupled physics time step
     subroutine coupled_time_step(sim, dt)
         type(simulation_t), intent(inout) :: sim
@@ -349,9 +331,11 @@ contains
         real(wp) :: flux(sim%nx, sim%ny, sim%nz)
         real(wp) :: temperature(sim%nx, sim%ny, sim%nz)
         real(wp) :: void_fraction(sim%nx, sim%ny, sim%nz)
+        real(wp) :: density(sim%nx, sim%ny, sim%nz)
+        real(wp), parameter :: rho_liquid = 0.738_wp  ! g/cm³
+        real(wp), parameter :: rho_vapor = 0.038_wp   ! g/cm³
         
         ! 1. Point kinetics for fast neutronics response
-        ! (Could use full space-time kinetics for accuracy)
         call mg_solve_eigenvalue(sim%neutronics, sim%k_eff, converged)
         
         ! 2. Power distribution
@@ -376,14 +360,26 @@ contains
             sim%mass_flux_core + 0.0_wp * temperature, &
             power / (sim%dx * sim%dy), dt)
         
+        ! Get void fraction
         call two_phase_get_void_fraction(sim%thermalhydraulics, void_fraction)
+        
+        ! FIX: Compute moderator density from void fraction
+        density = (1.0_wp - void_fraction) * rho_liquid + void_fraction * rho_vapor
+        density = max(density, rho_vapor)
+        density = min(density, rho_liquid)
+        
         sim%avg_void_fraction = sum(void_fraction) / size(void_fraction) * 100.0_wp
         sim%max_void_fraction = maxval(void_fraction) * 100.0_wp
-        sim%min_chfr = minval(sim%thermalhydraulics%chf_ratio)
+        
+        ! Get CHFR if available
+        if (allocated(sim%thermalhydraulics%chf_ratio)) then
+            sim%min_chfr = minval(sim%thermalhydraulics%chf_ratio)
+        else
+            sim%min_chfr = 999.0_wp
+        end if
         
         ! 6. Update cross sections with feedback
-        call update_cross_sections_feedback(sim, temperature, &
-            738.0_wp * (1.0_wp - void_fraction))
+        call update_cross_sections_feedback(sim, temperature, density)
         
         ! Update reactivity
         sim%reactivity_pcm = (sim%k_eff - 1.0_wp) / sim%k_eff * 1.0e5_wp
@@ -392,6 +388,88 @@ contains
         sim%n_steps = sim%n_steps + 1
         
     end subroutine coupled_time_step
+
+    !> Solve for initial steady state
+    subroutine solve_steady_state(sim)
+        type(simulation_t), intent(inout) :: sim
+        
+        integer :: iter
+        real(wp) :: power(sim%nx, sim%ny, sim%nz)
+        real(wp) :: temperature(sim%nx, sim%ny, sim%nz)
+        real(wp) :: void_fraction(sim%nx, sim%ny, sim%nz)
+        real(wp) :: density(sim%nx, sim%ny, sim%nz)
+        real(wp) :: error
+        real(wp), parameter :: rho_liquid = 0.738_wp  ! g/cm³ at 7 MPa, 287°C
+        real(wp), parameter :: rho_vapor = 0.038_wp   ! g/cm³ at 7 MPa
+        
+        ! Iterative coupling for steady state
+        do iter = 1, 50
+            ! 1. Solve neutronics with current T, ρ
+            call mg_solve_eigenvalue(sim%neutronics, sim%k_eff, converged)
+            
+            if (.not. converged) then
+                print *, "Warning: Neutronics did not converge at iteration", iter
+            end if
+            
+            ! 2. Get power distribution
+            call mg_get_power(sim%neutronics, power)
+            sim%power_current = sim%neutronics%total_power
+            
+            ! 3. Solve heat transfer
+            sim%heat%q = power
+            call heat_step(sim%heat, 1.0_wp)  ! Large pseudo-timestep
+            
+            temperature = sim%heat%T
+            sim%max_fuel_temp = maxval(temperature)
+            
+            ! 4. Solve two-phase flow
+            ! Initialize with liquid density (in kg/m³ for thermal-hydraulics)
+            call two_phase_step(sim%thermalhydraulics, &
+                temperature, &
+                sim%pressure_operating + 0.0_wp * temperature, &
+                sim%mass_flux_core + 0.0_wp * temperature, &
+                power / (sim%dx * sim%dy), 1.0_wp)
+            
+            ! Get void fraction (0 to 1)
+            call two_phase_get_void_fraction(sim%thermalhydraulics, void_fraction)
+            
+            ! FIX: Compute moderator density from void fraction
+            ! Two-phase mixture density: ρ = (1-α)·ρ_liquid + α·ρ_vapor
+            density = (1.0_wp - void_fraction) * rho_liquid + void_fraction * rho_vapor
+            
+            ! Clamp to reasonable range
+            density = max(density, rho_vapor)
+            density = min(density, rho_liquid)
+            
+            sim%avg_void_fraction = sum(void_fraction) / size(void_fraction) * 100.0_wp
+            sim%max_void_fraction = maxval(void_fraction) * 100.0_wp
+            
+            ! 5. Update cross sections with feedback
+            call update_cross_sections_feedback(sim, temperature, density)
+            
+            ! Check convergence
+            error = abs(sim%k_eff - 1.0_wp) + &
+                abs(sim%power_current - sim%power_rated) / sim%power_rated
+            
+            if (mod(iter, 5) == 0) then
+                print '(A,I3,A,F10.6,A,F10.2)', '  Coupling iter ', iter, &
+                    ': k_eff = ', sim%k_eff, ', avg void = ', sim%avg_void_fraction
+            end if
+            
+            if (error < 1.0e-4_wp .and. iter > 3) exit
+        end do
+        
+        ! Final calculations
+        sim%reactivity_pcm = (sim%k_eff - 1.0_wp) / sim%k_eff * 1.0e5_wp
+        
+        ! Get CHFR if available
+        if (allocated(sim%thermalhydraulics%chf_ratio)) then
+            sim%min_chfr = minval(sim%thermalhydraulics%chf_ratio)
+        else
+            sim%min_chfr = 999.0_wp  ! Not computed
+        end if
+        
+    end subroutine solve_steady_state
     
     !> Update cross sections with T and ρ feedback
     subroutine update_cross_sections_feedback(sim, T, rho)

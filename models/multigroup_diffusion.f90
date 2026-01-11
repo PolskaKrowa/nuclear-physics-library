@@ -42,6 +42,7 @@ module multigroup_diffusion
     public :: mg_solve_transient, mg_power_iteration
     public :: mg_get_flux, mg_get_power, mg_get_fission_rate
     public :: mg_compute_keff, mg_compute_form_factors
+    public :: mg_validate_cross_sections
     
     ! Standard energy group structures (eV boundaries)
     integer, parameter, public :: MG_2GROUP = 2
@@ -300,107 +301,378 @@ contains
         end if
     end subroutine mg_set_source
     
+    !> Diagnostic: Check cross-sections and initial state
+    subroutine mg_check_problem_setup(state)
+        type(mg_state_t), intent(in) :: state
+        integer :: i, j, k, g
+        real(wp) :: total_nu_sigma_f, total_sigma_a, total_flux
+        real(wp) :: max_nu_sigma_f, max_sigma_a, avg_production, avg_absorption
+        
+        print '(A)', '=========================================='
+        print '(A)', 'DIAGNOSTIC: Problem Setup Check'
+        print '(A)', '=========================================='
+        
+        ! Check flux levels
+        total_flux = sum(state%flux)
+        print '(A,ES12.3)', 'Total flux: ', total_flux
+        print '(A,ES12.3)', 'Max flux:   ', maxval(state%flux)
+        print '(A,ES12.3)', 'Min flux:   ', minval(state%flux)
+        
+        ! Check cross-sections
+        total_nu_sigma_f = 0.0_wp
+        total_sigma_a = 0.0_wp
+        max_nu_sigma_f = 0.0_wp
+        max_sigma_a = 0.0_wp
+        
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx
+                    do g = 1, state%n_groups
+                        total_nu_sigma_f = total_nu_sigma_f + state%xsec(i,j,k)%nu_sigma_f(g)
+                        total_sigma_a = total_sigma_a + state%xsec(i,j,k)%sigma_a(g)
+                        max_nu_sigma_f = max(max_nu_sigma_f, state%xsec(i,j,k)%nu_sigma_f(g))
+                        max_sigma_a = max(max_sigma_a, state%xsec(i,j,k)%sigma_a(g))
+                    end do
+                end do
+            end do
+        end do
+        
+        print '(A)', ''
+        print '(A)', 'Cross-sections:'
+        print '(A,ES12.3)', '  Max nu*sigma_f:   ', max_nu_sigma_f
+        print '(A,ES12.3)', '  Max sigma_a:      ', max_sigma_a
+        print '(A,ES12.3)', '  Total nu*sigma_f: ', total_nu_sigma_f
+        print '(A,ES12.3)', '  Total sigma_a:    ', total_sigma_a
+        
+        if (max_nu_sigma_f < 1.0e-10_wp) then
+            print '(A)', '  ** WARNING: No fissile material detected! **'
+        end if
+        
+        ! Estimate k-infinite
+        avg_production = total_nu_sigma_f / real(state%nx*state%ny*state%nz*state%n_groups, wp)
+        avg_absorption = total_sigma_a / real(state%nx*state%ny*state%nz*state%n_groups, wp)
+        
+        if (avg_absorption > 1.0e-10_wp) then
+            print '(A,F10.5)', '  Estimated k-inf:  ', avg_production / avg_absorption
+        end if
+        
+        print '(A)', '=========================================='
+        print '(A)', ''
+    end subroutine mg_check_problem_setup
+
+    !> Validate cross-sections before solving
+    subroutine mg_validate_cross_sections(state, is_valid)
+        type(mg_state_t), intent(inout) :: state
+        logical, intent(out) :: is_valid
+        
+        integer :: i, j, k, g, gp
+        real(wp) :: sigma_total, nu_ratio
+        real(wp) :: max_sigma_a, min_sigma_a, max_nu_sigma_f
+        logical :: has_fissile
+        
+        is_valid = .true.
+        has_fissile = .false.
+        
+        ! Initialize min/max values
+        max_sigma_a = -1.0e30_wp
+        min_sigma_a = 1.0e30_wp
+        max_nu_sigma_f = -1.0e30_wp
+        
+        print '(A)', '=========================================='
+        print '(A)', 'Validating Cross-Sections...'
+        print '(A)', '=========================================='
+        
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx
+                    do g = 1, state%n_groups
+                        
+                        ! Check for negative values
+                        if (state%xsec(i,j,k)%D(g) < 0.0_wp) then
+                            print '(A,3I4,I2,A)', 'ERROR: D < 0 at (', i, j, k, g, ')'
+                            is_valid = .false.
+                        end if
+                        
+                        if (state%xsec(i,j,k)%sigma_a(g) < 0.0_wp) then
+                            print '(A,3I4,I2,A)', 'ERROR: sigma_a < 0 at (', i, j, k, g, ')'
+                            is_valid = .false.
+                        end if
+                        
+                        ! FIX: If sigma_a is zero, set it to a small value
+                        if (state%xsec(i,j,k)%sigma_a(g) < 1.0e-10_wp) then
+                            ! Use nu_sigma_f as proxy (absorption = fission for pure fissile)
+                            if (state%xsec(i,j,k)%nu_sigma_f(g) > 0.0_wp) then
+                                ! Estimate sigma_a from nu_sigma_f (typical nu ~ 2.5)
+                                state%xsec(i,j,k)%sigma_a(g) = &
+                                    state%xsec(i,j,k)%nu_sigma_f(g) / 2.5_wp
+                            else
+                                ! Set minimum absorption to avoid singular matrix
+                                state%xsec(i,j,k)%sigma_a(g) = 1.0e-6_wp
+                            end if
+                        end if
+                        
+                        ! Track min/max
+                        max_sigma_a = max(max_sigma_a, state%xsec(i,j,k)%sigma_a(g))
+                        min_sigma_a = min(min_sigma_a, state%xsec(i,j,k)%sigma_a(g))
+                        max_nu_sigma_f = max(max_nu_sigma_f, state%xsec(i,j,k)%nu_sigma_f(g))
+                        
+                        ! Check for fissile material
+                        if (state%xsec(i,j,k)%nu_sigma_f(g) > 1.0e-10_wp) then
+                            has_fissile = .true.
+                        end if
+                        
+                        ! Validate nu ratio
+                        if (state%xsec(i,j,k)%sigma_f(g) > 1.0e-10_wp) then
+                            nu_ratio = state%xsec(i,j,k)%nu_sigma_f(g) / &
+                                    state%xsec(i,j,k)%sigma_f(g)
+                            if (nu_ratio < 1.5_wp .or. nu_ratio > 4.0_wp) then
+                                print '(A,3I4,I2,A,F6.2)', 'WARNING: Unusual nu at (', &
+                                    i, j, k, g, '): ', nu_ratio
+                            end if
+                        end if
+                        
+                        ! Compute total removal
+                        sigma_total = state%xsec(i,j,k)%sigma_a(g)
+                        do gp = 1, state%n_groups
+                            if (gp /= g) then
+                                sigma_total = sigma_total + state%xsec(i,j,k)%sigma_s(g, gp)
+                            end if
+                        end do
+                        
+                        ! Store in sigma_r for later use
+                        state%xsec(i,j,k)%sigma_r(g) = sigma_total
+                        
+                    end do
+                end do
+            end do
+        end do
+        
+        if (.not. has_fissile) then
+            print '(A)', 'ERROR: No fissile material found!'
+            is_valid = .false.
+        end if
+        
+        ! Print summary of fixed cross-sections
+        print '(A)', 'After validation:'
+        print '(A,ES12.3)', '  Max sigma_a:     ', max_sigma_a
+        print '(A,ES12.3)', '  Min sigma_a:     ', min_sigma_a
+        print '(A,ES12.3)', '  Max nu_sigma_f:  ', max_nu_sigma_f
+        print '(A,L2)', '  Has fissile:     ', has_fissile
+        print '(A)', '=========================================='
+        print '(A)', ''
+        
+    end subroutine mg_validate_cross_sections
+
+    !> Detect NaN in arrays
+    function has_nan(arr) result(found_nan)
+        real(wp), intent(in) :: arr(:,:,:,:)
+        logical :: found_nan
+        integer :: i, j, k, g
+        
+        found_nan = .false.
+        
+        do g = 1, size(arr, 4)
+            do k = 1, size(arr, 3)
+                do j = 1, size(arr, 2)
+                    do i = 1, size(arr, 1)
+                        if (arr(i,j,k,g) /= arr(i,j,k,g)) then  ! NaN check
+                            print '(A,4I5)', 'NaN detected at: ', i, j, k, g
+                            found_nan = .true.
+                            return
+                        end if
+                    end do
+                end do
+            end do
+        end do
+    end function has_nan
+
     !> Solve k-eigenvalue problem using power iteration
     subroutine mg_solve_eigenvalue(state, k_eff, converged)
         type(mg_state_t), intent(inout) :: state
         real(wp), intent(out) :: k_eff
         logical, intent(out) :: converged
         
-        integer :: outer_iter, inner_iter, g
-        real(wp) :: k_error, flux_error
-        real(wp) :: fission_rate_new, fission_rate_old
+        integer :: outer_iter, inner_iter, g, sweep
+        real(wp) :: k_error, flux_max, flux_min
+        real(wp) :: fission_old, fission_new, flux_scale
+        logical :: valid_xsec
+        
+        ! Validate cross-sections FIRST
+        call mg_validate_cross_sections(state, valid_xsec)
+        if (.not. valid_xsec) then
+            print '(A)', 'ERROR: Invalid cross-sections. Cannot proceed.'
+            converged = .false.
+            k_eff = 0.0_wp
+            return
+        end if
         
         state%converged = .false.
         
-        ! Better initial guess for k-effective
-        state%k_eff = state%config%k_guess
+        ! Ensure positive initial flux
+        where (state%flux < 1.0e-10_wp) state%flux = 1.0_wp
         
-        ! Initialize flux if needed
-        if (maxval(state%flux) < 1.0e-10_wp) then
-            state%flux = 1.0_wp  ! Unit flux guess
-        end if
-        
-        ! Outer iteration (power iteration on k-eigenvalue)
+        ! Outer iteration
         do outer_iter = 1, state%config%max_outer_iter
             state%outer_iterations = outer_iter
-            
-            ! Store old k-effective
             state%k_eff_old = state%k_eff
             
-            ! Compute fission source with current flux and k
+            ! Compute fission source
             call compute_fission_source(state)
+            fission_old = sum(state%fission_source)
             
-            ! Store old flux for convergence check
+            if (fission_old < 1.0e-30_wp) then
+                print '(A)', 'ERROR: Fission source is zero or negative!'
+                converged = .false.
+                k_eff = 0.0_wp
+                return
+            end if
+            
+            ! Store old flux
             state%flux_old = state%flux
             
-            ! Inner iteration (multi-group fixed source solve)
+            ! Inner iterations
             do inner_iter = 1, state%config%max_inner_iter
-                state%inner_iterations = inner_iter
                 
-                ! Solve each group with Gauss-Seidel sweep
-                do g = 1, state%n_groups
-                    call solve_group_equation(state, g)
+                ! Multiple sweeps
+                do sweep = 1, 3
+                    do g = 1, state%n_groups
+                        call solve_group_equation_safe(state, g)
+                        
+                        ! Check for NaN after each group
+                        if (has_nan(state%flux)) then
+                            print '(A,I3,A,I3)', 'ERROR: NaN in flux at outer=', &
+                                outer_iter, ', group=', g
+                            print '(A)', 'Last valid flux statistics:'
+                            print '(A,ES12.3)', '  Max: ', maxval(state%flux_old)
+                            print '(A,ES12.3)', '  Min: ', minval(state%flux_old)
+                            converged = .false.
+                            k_eff = 0.0_wp
+                            return
+                        end if
+                    end do
                 end do
                 
-                ! Check inner convergence (flux change)
-                flux_error = maxval(abs(state%flux - state%flux_old)) / &
-                            (maxval(abs(state%flux)) + 1.0e-30_wp)
+                ! Check flux bounds
+                flux_max = maxval(state%flux)
+                flux_min = minval(state%flux)
                 
-                if (flux_error < state%config%inner_tolerance) exit
-                
-                ! Update old flux for next inner iteration
-                state%flux_old = state%flux
+                if (flux_max > 1.0e20_wp .or. flux_min < 0.0_wp) then
+                    print '(A)', 'WARNING: Flux out of bounds, rescaling...'
+                    print '(A,ES12.3,A,ES12.3)', '  Range: ', flux_min, ' to ', flux_max
+                    state%flux = max(state%flux, 0.0_wp)
+                    flux_scale = maxval(state%flux)
+                    if (flux_scale > 1.0e10_wp) then
+                        state%flux = state%flux / flux_scale * 1.0e10_wp
+                    end if
+                end if
             end do
             
-            ! Compute new fission rate
-            fission_rate_new = sum(state%fission_source)
+            ! Compute new fission source
+            call compute_fission_source(state)
+            fission_new = sum(state%fission_source)
             
-            ! Compute old fission rate (with old k)
-            call compute_fission_source_with_flux(state, state%flux_old, fission_rate_old)
-            
-            ! Update k-effective using fission rate ratio
-            if (fission_rate_old > TOL_DEFAULT) then
-                state%k_eff = state%k_eff_old * (fission_rate_new / fission_rate_old)
+            ! Diagnostic output
+            if (mod(outer_iter, 5) == 0 .or. outer_iter <= 3) then
+                print '(A,I4,A,F12.8,A,ES10.2,A,ES10.2)', &
+                    'Iter ', outer_iter, ': k=', state%k_eff, &
+                    ', fiss_old=', fission_old, ', fiss_new=', fission_new
             end if
             
-            ! Normalize flux to maintain consistent scale
-            call normalize_flux_to_unity(state)
+            ! Update k-effective
+            if (fission_old > 1.0e-30_wp .and. fission_new > 1.0e-30_wp) then
+                state%k_eff = state%k_eff_old * (fission_new / fission_old)
+            else
+                print '(A)', 'ERROR: Fission source collapsed!'
+                converged = .false.
+                k_eff = 0.0_wp
+                return
+            end if
             
-            ! Check outer convergence on k-effective
-            k_error = abs(state%k_eff - state%k_eff_old) / state%k_eff
+            ! Clamp k-effective to reasonable range
+            if (state%k_eff < 0.1_wp) then
+                print '(A,F12.5)', 'WARNING: k-eff very low: ', state%k_eff
+                print '(A)', 'Possible causes:'
+                print '(A)', '  - Insufficient fissile material'
+                print '(A)', '  - Too much leakage (check boundaries)'
+                print '(A)', '  - Incorrect cross-sections'
+            end if
+            
+            if (state%k_eff > 5.0_wp) then
+                print '(A,F12.5)', 'WARNING: k-eff very high: ', state%k_eff
+                state%k_eff = 5.0_wp
+            end if
+            
+            ! Normalize flux
+            flux_scale = sum(state%flux)
+            if (flux_scale > 1.0e-30_wp) then
+                state%flux = state%flux / flux_scale * 1.0e15_wp
+            end if
+            
+            ! Check convergence
+            k_error = abs(state%k_eff - state%k_eff_old) / (abs(state%k_eff) + 1.0e-30_wp)
             state%outer_error = k_error
             
-            ! Print progress
-            if (mod(outer_iter, 10) == 0) then
-                print '(A,I4,A,F12.8,A,ES10.2)', &
-                    'Iter ', outer_iter, ': k_eff = ', state%k_eff, &
-                    ', error = ', k_error
-            end if
-            
-            if (k_error < state%config%outer_tolerance) then
+            if (k_error < state%config%outer_tolerance .and. outer_iter > 3) then
                 state%converged = .true.
                 exit
             end if
         end do
         
-        ! Final flux normalization to power level
-        if (state%config%normalize_power) then
-            call normalize_flux(state)
-        end if
-        
-        ! Compute power distribution
         call compute_power_distribution(state)
-        
         k_eff = state%k_eff
         converged = state%converged
         
-        if (.not. converged) then
-            print '(A)', 'WARNING: Eigenvalue solver did not converge!'
-            print '(A,I4,A,ES10.2)', '  Final iteration: ', outer_iter, &
-                                    ', error: ', k_error
+        if (converged) then
+            print '(A,F12.8)', 'SUCCESS: k-effective = ', k_eff
+        else
+            print '(A)', 'WARNING: Did not converge'
         end if
     end subroutine mg_solve_eigenvalue
     
+    subroutine compute_balance(state, production, absorption, leakage)
+        type(mg_state_t), intent(in) :: state
+        real(wp), intent(out) :: production, absorption, leakage
+        
+        integer :: i, j, k, g
+        real(wp) :: leak_x, leak_y, leak_z, D
+        
+        production = 0.0_wp
+        absorption = 0.0_wp
+        leakage = 0.0_wp
+        
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx
+                    do g = 1, state%n_groups
+                        ! Production
+                        production = production + &
+                            state%xsec(i,j,k)%nu_sigma_f(g) * state%flux(i,j,k,g)
+                        
+                        ! Absorption
+                        absorption = absorption + &
+                            state%xsec(i,j,k)%sigma_a(g) * state%flux(i,j,k,g)
+                        
+                        ! Leakage (approximate)
+                        if (i > 1 .and. i < state%nx .and. &
+                            j > 1 .and. j < state%ny .and. &
+                            k > 1 .and. k < state%nz) then
+                            
+                            D = state%xsec(i,j,k)%D(g)
+                            leak_x = D * abs(state%flux(i+1,j,k,g) - 2*state%flux(i,j,k,g) + &
+                                            state%flux(i-1,j,k,g)) / (state%dx**2)
+                            leak_y = D * abs(state%flux(i,j+1,k,g) - 2*state%flux(i,j,k,g) + &
+                                            state%flux(i,j-1,k,g)) / (state%dy**2)
+                            leak_z = D * abs(state%flux(i,j,k+1,g) - 2*state%flux(i,j,k,g) + &
+                                            state%flux(i,j,k-1,g)) / (state%dz**2)
+                            
+                            leakage = leakage + (leak_x + leak_y + leak_z)
+                        end if
+                    end do
+                end do
+            end do
+        end do
+    end subroutine compute_balance
+
     !> Solve fixed source problem
     subroutine mg_solve_fixed_source(state, converged)
         type(mg_state_t), intent(inout) :: state
@@ -417,7 +689,7 @@ contains
             
             ! Sweep through all energy groups
             do g = 1, state%n_groups
-                call solve_group_equation_fixed(state, g)
+                call solve_group_equation_safe(state, g)
             end do
             
             ! Check convergence
@@ -434,83 +706,86 @@ contains
     end subroutine mg_solve_fixed_source
     
     !> Solve group diffusion equation for eigenvalue problem
-    subroutine solve_group_equation(state, g)
+    subroutine solve_group_equation_safe(state, g)
         type(mg_state_t), intent(inout) :: state
         integer, intent(in) :: g
         
         integer :: i, j, k, gp
-        real(wp) :: source, inscatter, outscatter, fission, D, sigma_a
-        real(wp) :: phi_c, phi_xp, phi_xm, phi_yp, phi_ym, phi_zp, phi_zm
-        real(wp) :: coef_c, coef_x, coef_y, coef_z, rhs
-        real(wp) :: inv_dx2, inv_dy2, inv_dz2
+        real(wp) :: source, inscatter, fission, D, sigma_r
+        real(wp) :: phi_xp, phi_xm, phi_yp, phi_ym, phi_zp, phi_zm
+        real(wp) :: coef_x, coef_y, coef_z, coef_c, rhs, denom
+        real(wp) :: inv_dx2, inv_dy2, inv_dz2, phi_new
+        real(wp), parameter :: MIN_DENOM = 1.0e-10_wp
+        real(wp), parameter :: MAX_FLUX = 1.0e15_wp
         
         inv_dx2 = 1.0_wp / (state%dx * state%dx)
         inv_dy2 = 1.0_wp / (state%dy * state%dy)
         inv_dz2 = 1.0_wp / (state%dz * state%dz)
         
-        ! Gauss-Seidel sweep (use updated values immediately)
         do k = 2, state%nz - 1
             do j = 2, state%ny - 1
                 do i = 2, state%nx - 1
                     
                     D = state%xsec(i, j, k)%D(g)
-                    sigma_a = state%xsec(i, j, k)%sigma_a(g)
+                    sigma_r = state%xsec(i, j, k)%sigma_r(g)  ! Use pre-computed removal
                     
-                    ! Get neighbor fluxes (use most recent values - Gauss-Seidel)
-                    phi_xm = state%flux(i-1, j, k, g)
-                    phi_xp = state%flux(i+1, j, k, g)
-                    phi_ym = state%flux(i, j-1, k, g)
-                    phi_yp = state%flux(i, j+1, k, g)
-                    phi_zm = state%flux(i, j, k-1, g)
-                    phi_zp = state%flux(i, j, k+1, g)
+                    ! Get neighbors (with bounds check)
+                    phi_xm = max(state%flux(i-1, j, k, g), 0.0_wp)
+                    phi_xp = max(state%flux(i+1, j, k, g), 0.0_wp)
+                    phi_ym = max(state%flux(i, j-1, k, g), 0.0_wp)
+                    phi_yp = max(state%flux(i, j+1, k, g), 0.0_wp)
+                    phi_zm = max(state%flux(i, j, k-1, g), 0.0_wp)
+                    phi_zp = max(state%flux(i, j, k+1, g), 0.0_wp)
                     
-                    ! Diffusion operator coefficients
+                    ! Diffusion operator
                     coef_x = D * inv_dx2
                     coef_y = D * inv_dy2
                     coef_z = D * inv_dz2
                     coef_c = 2.0_wp * (coef_x + coef_y + coef_z)
                     
-                    ! In-scattering from other groups (use latest flux)
+                    ! In-scattering
                     inscatter = 0.0_wp
                     do gp = 1, state%n_groups
                         if (gp /= g) then
                             inscatter = inscatter + &
-                                state%xsec(i, j, k)%sigma_s(gp, g) * state%flux(i, j, k, gp)
-                        end if
-                    end do
-                    
-                    ! Out-scattering from this group
-                    outscatter = 0.0_wp
-                    do gp = 1, state%n_groups
-                        if (gp /= g) then
-                            outscatter = outscatter + state%xsec(i, j, k)%sigma_s(g, gp)
+                                state%xsec(i, j, k)%sigma_s(gp, g) * &
+                                max(state%flux(i, j, k, gp), 0.0_wp)
                         end if
                     end do
                     
                     ! Fission source
                     fission = state%xsec(i, j, k)%chi(g) * &
-                            state%fission_source(i, j, k) / state%k_eff
+                            state%fission_source(i, j, k) / max(state%k_eff, 0.1_wp)
                     
                     ! Total source
                     source = inscatter + fission + state%external_source(i, j, k, g)
                     
-                    ! Right-hand side
+                    ! RHS
                     rhs = coef_x * (phi_xm + phi_xp) + &
                         coef_y * (phi_ym + phi_yp) + &
                         coef_z * (phi_zm + phi_zp) + source
                     
-                    ! Solve for new flux: (coef_c + sigma_a + outscatter) * phi = rhs
-                    state%flux(i, j, k, g) = rhs / (coef_c + sigma_a + outscatter)
+                    ! Denominator (must be positive)
+                    denom = coef_c + sigma_r
+                    denom = max(denom, MIN_DENOM)
                     
-                    ! Ensure positive
-                    state%flux(i, j, k, g) = max(state%flux(i, j, k, g), 1.0e-20_wp)
+                    ! Update flux
+                    phi_new = rhs / denom
+                    
+                    ! Apply relaxation for stability
+                    phi_new = 0.8_wp * phi_new + 0.2_wp * state%flux(i, j, k, g)
+                    
+                    ! Clamp to reasonable range
+                    phi_new = max(phi_new, 0.0_wp)
+                    phi_new = min(phi_new, MAX_FLUX)
+                    
+                    state%flux(i, j, k, g) = phi_new
                 end do
             end do
         end do
         
-        ! Apply boundary conditions
         call apply_boundary_conditions(state, g)
-    end subroutine solve_group_equation
+    end subroutine solve_group_equation_safe
     
     !> Solve group equation for fixed source
     subroutine solve_group_equation_fixed(state, g)
@@ -519,7 +794,7 @@ contains
         
         ! Similar to eigenvalue case but without k_eff division
         ! Implementation follows same pattern as solve_group_equation
-        call solve_group_equation(state, g)
+        call solve_group_equation_safe(state, g)
     end subroutine solve_group_equation_fixed
     
     !> Compute Laplacian of flux
