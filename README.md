@@ -1,92 +1,105 @@
-<div align="center" style="padding: 10px">
+<div align="center">
 
-<a href="">![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) </a>
-<a href="">![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library)</a>
-<a href="">![GitHub Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)</a>
+# ⚛️ Nuclear Physics Library
+
+### High-Performance Fortran Toolkit for Reactor Simulations & Multiphysics Studies
+
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml)](https://github.com/PolskaKrowa/nuclear-physics-library/actions)
+[![License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)](https://github.com/PolskaKrowa/nuclear-physics-library/releases)
+[![Fortran](https://img.shields.io/badge/Fortran-734F96?logo=fortran&logoColor=white)](https://fortran-lang.org/)
+
+[Features](#-features) • [Installation](#-installation) • [Documentation](#-module-organisation) • [Contributing](#-contributing) • [Roadmap](#-roadmap)
 
 </div>
 
-# Nuclear Physics Library
+---
 
-Nuclear Physics Library is a high‑performance Fortran toolkit providing utilities, numerical solvers, and physics models to support the development of reactor simulations and multiphysics studies.
+## 📚 Overview
 
-## Features
+Nuclear Physics Library is a comprehensive Fortran toolkit providing utilities, numerical solvers, and physics models to support the development of reactor simulations and multiphysics studies. Built for performance and accuracy, it offers a complete suite of mathematical kernels and physics models.
 
-### Core Utilities
-- **Precision Control**: Standardised kind parameters (single, double, quad precision)
-- **Physical Constants**: Mathematical and physical constants with high accuracy
-- **Random Number Generation**: Deterministic RNG with multiple distributions
-- **Numerical Utilities**: Array operations, interpolation, integration, and safety functions
+## ✨ Features
 
-### Mathematical Kernels
+<details open>
+<summary><b>🔧 Core Utilities</b></summary>
 
-#### Linear Algebra
-- Dense matrix operations using BLAS/LAPACK
-- Eigenvalue solvers (symmetric, general, generalised)
-- Linear system solvers (LU, Cholesky, iterative methods)
-- Sparse matrix operations (CSR format)
-- SVD, QR, and Schur decompositions
+<br>
 
-#### ODE Solvers
-- **RK4**: Classic fourth-order Runge-Kutta
-- **Dormand-Prince (DOPRI5)**: Adaptive step-size method
-- **Backward Euler**: Implicit method for stiff equations
+| Component | Description |
+|-----------|-------------|
+| **Precision Control** | Standardised kind parameters (single, double, quad precision) |
+| **Physical Constants** | Mathematical and physical constants with high accuracy |
+| **Random Number Generation** | Deterministic RNG with multiple distributions |
+| **Numerical Utilities** | Array operations, interpolation, integration, and safety functions |
 
-#### Optimisation
-- Gradient descent (with momentum, Adam)
-- Conjugate gradient methods (Fletcher-Reeves, Polak-Ribière)
-- Quasi-Newton methods (BFGS, L-BFGS)
-- Constrained optimisation (projected gradient, penalty methods)
+</details>
 
-#### PDE Methods
+<details open>
+<summary><b>🧮 Mathematical Kernels</b></summary>
+
+<br>
+
+### Linear Algebra
+- ✅ Dense matrix operations using BLAS/LAPACK
+- ✅ Eigenvalue solvers (symmetric, general, generalised)
+- ✅ Linear system solvers (LU, Cholesky, iterative methods)
+- ✅ Sparse matrix operations (CSR format)
+- ✅ SVD, QR, and Schur decompositions
+
+### ODE Solvers
+| Method | Type | Use Case |
+|--------|------|----------|
+| **RK4** | Explicit | Classic fourth-order Runge-Kutta |
+| **DOPRI5** | Adaptive | Dormand-Prince with adaptive step-size |
+| **Backward Euler** | Implicit | Stiff equations |
+
+### Optimisation Algorithms
+- **Gradient Methods**: Gradient descent (with momentum, Adam)
+- **Conjugate Gradient**: Fletcher-Reeves, Polak-Ribière
+- **Quasi-Newton**: BFGS, L-BFGS
+- **Constrained**: Projected gradient, penalty methods
+
+### PDE Methods
 - **Finite Difference**: Various accuracy orders and boundary conditions
 - **Finite Volume**: Conservation law solvers with multiple flux schemes
 - **Spectral Methods**: FFT-based derivatives and Poisson solvers
 
-### Physics Models
+</details>
 
-#### Fluid Dynamics
-- Incompressible Navier-Stokes equations
-- Projection method for pressure-velocity coupling
-- Natural convection (Boussinesq approximation)
-- Multiple fluid regions with different properties
+<details open>
+<summary><b>⚡ Physics Models</b></summary>
 
-#### Heat Transfer
-- Diffusion-convection equation with source terms
-- Multiple material regions
-- Various boundary conditions (Dirichlet, Neumann, convective)
-- Coupled with fluid flow
+<br>
 
-#### Nuclear Fission
-- Point kinetics equations with delayed neutrons
-- Multi-group neutron diffusion
-- Fission power density calculation
-- Decay heat generation (ANS-5.1 standard)
-- 6-group delayed neutron precursor model
+| Model | Capabilities |
+|-------|-------------|
+| **Fluid Dynamics** | Incompressible Navier-Stokes, projection method, natural convection, multi-region support |
+| **Heat Transfer** | Diffusion-convection with sources, multi-material regions, coupled flow |
+| **Nuclear Fission** | Point kinetics, multi-group diffusion, decay heat (ANS-5.1), 6-group precursors |
+| **Pressure Dynamics** | Multiple EOS, acoustic waves, phase transitions, compressibility |
 
-#### Pressure Dynamics
-- Multiple equations of state (ideal gas, incompressible, stiffened gas)
-- Acoustic wave propagation
-- Liquid/vapour phase transitions
-- Compressibility effects
+</details>
 
-## Installation
+## 🚀 Installation
 
 ### Prerequisites
 
-- **Fortran Compiler**: gfortran 9.0+ or ifort
-- **CMake**: Version 3.20 or higher
-- **BLAS/LAPACK**: For linear algebra operations
-- **MSYS2**: If compiling on Windows
+> [!IMPORTANT]
+> Ensure you have the following installed:
+> - **Fortran Compiler**: gfortran 9.0+ or Intel Fortran
+> - **CMake**: Version 3.20 or higher
+> - **BLAS/LAPACK**: For linear algebra operations
+> - **MSYS2**: Required for Windows compilation
 
-### Building from Source
+### Quick Start
 
 ```bash
 # Clone the repository
 git clone https://github.com/PolskaKrowa/nuclear-physics-library.git
 cd nuclear-physics-library/
 
-# Create build directory
+# Create and enter build directory
 mkdir build && cd build
 
 # Configure with CMake
@@ -99,7 +112,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-### Custom Installation Path
+### Custom Installation
 
 ```bash
 cmake -DCMAKE_INSTALL_PREFIX=/path/to/install ..
@@ -107,44 +120,88 @@ make -j$(nproc)
 make install
 ```
 
-### Build Options
+### Build Configurations
+
+<table>
+<tr>
+<th>Configuration</th>
+<th>Command</th>
+<th>Use Case</th>
+</tr>
+<tr>
+<td><b>Release</b></td>
+<td><code>cmake -DCMAKE_BUILD_TYPE=Release ..</code></td>
+<td>Production with optimisations</td>
+</tr>
+<tr>
+<td><b>Debug</b></td>
+<td><code>cmake -DCMAKE_BUILD_TYPE=Debug ..</code></td>
+<td>Development with symbols</td>
+</tr>
+<tr>
+<td><b>Intel Compiler</b></td>
+<td><code>cmake -DCMAKE_Fortran_COMPILER=ifort ..</code></td>
+<td>Intel-optimised builds</td>
+</tr>
+</table>
+
+### Manual Library Specification
+
+> [!NOTE]
+> CMake may require manual specification of BLAS/LAPACK locations:
 
 ```bash
-# Release build with optimisations
-cmake -DCMAKE_BUILD_TYPE=Release ..
-
-# Debug build with symbols
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-
-# Specify compiler
-cmake -DCMAKE_Fortran_COMPILER=ifort ..
+cmake -DBLAS_LIBRARIES=/path/to/libblas.so \
+      -DLAPACK_LIBRARIES=/path/to/liblapack.so ..
 ```
 
-In some cases, CMake will require you to manually specify the location of your BLAS and LAPACK libraries.
-You can do this by simply passing:
+> [!TIP]
+> **OpenBLAS Support**: This programme supports OpenBLAS, which includes LAPACK in the same `.so` file. However, both libraries must still be passed to CMake for proper linking.
+
+### Platform-Specific Dependencies
+
+<details>
+<summary><b>🐧 Ubuntu/Debian</b></summary>
+
 ```bash
--DBLAS_LIBRARIES=/path/to/libblas.so -DLAPACK_LIBRARIES=/path/to/liblapack.so
+sudo apt-get update
+sudo apt-get install gfortran cmake libblas-dev liblapack-dev
 ```
-to the CMake command.
-This program also supports compiling using OpenBLAS, which includes LAPACK in the same .so file, however both libraries must still be passed into the CMake command to ensure that the compiler is able to properly link the libraries to the program.
+</details>
 
-## Module Organisation
+<details>
+<summary><b>🍎 macOS</b></summary>
+
+```bash
+brew install gcc cmake openblas lapack
+```
+</details>
+
+<details>
+<summary><b>🎩 Red Hat/CentOS</b></summary>
+
+```bash
+sudo yum install gcc-gfortran cmake blas-devel lapack-devel
+```
+</details>
+
+## 📁 Module Organisation
 
 ```
 nuclear-physics-library/
-├── core/                    # Foundational utilities
-│   ├── kinds.f90           # Precision definitions
-│   ├── constants.f90       # Physical/mathematical constants
-│   ├── numeric_utils.f90   # Numerical utilities
-│   └── rng.f90            # Random number generation
+├── 📦 core/                    # Foundational utilities
+│   ├── kinds.f90              # Precision definitions
+│   ├── constants.f90          # Physical/mathematical constants
+│   ├── numeric_utils.f90      # Numerical utilities
+│   └── rng.f90                # Random number generation
 │
-├── kernels/                # Mathematical methods
-│   ├── linear_algebra/    # Matrix operations
-│   ├── ode/              # ODE solvers
-│   ├── optimisation/     # Optimisation algorithms
-│   └── pde/              # PDE methods
+├── 🧮 kernels/                 # Mathematical methods
+│   ├── linear_algebra/        # Matrix operations
+│   ├── ode/                   # ODE solvers
+│   ├── optimisation/          # Optimisation algorithms
+│   └── pde/                   # PDE methods
 │
-└── models/               # Physics models
+└── ⚡ models/                  # Physics models
     ├── burnup_depletion.f90
     ├── cross_sections.f90
     ├── multigroup_diffusion.f90
@@ -155,86 +212,67 @@ nuclear-physics-library/
     └── pressure_dynamics.f90
 ```
 
-## Dependencies
+## 📖 Dependencies
 
 ### Required
-- Fortran compiler (gfortran 9.0+ or Intel Fortran)
-- CMake 3.10+
-- BLAS/LAPACK libraries
+- ✅ Fortran compiler (gfortran 9.0+ or Intel Fortran)
+- ✅ CMake 3.10+
+- ✅ BLAS/LAPACK libraries
 
 ### Optional
-- FFTW3 (for optimised spectral methods)
-- MPI (for parallel simulations)
-- OpenMP (for shared-memory parallelisation)
+- 🔄 FFTW3 (for optimised spectral methods)
+- 🔄 MPI (for parallel simulations)
+- 🔄 OpenMP (for shared-memory parallelisation)
 
-### Installing Dependencies (Ubuntu/Debian)
-
-```bash
-sudo apt-get update
-sudo apt-get install gfortran cmake libblas-dev liblapack-dev
-```
-
-### Installing Dependencies (macOS)
-
-```bash
-brew install gcc cmake openblas lapack
-```
-
-### Installing Dependencies (Red Hat/CentOS)
-
-```bash
-sudo yum install gcc-gfortran cmake blas-devel lapack-devel
-```
-
-## Performance Considerations
+## ⚡ Performance Considerations
 
 ### Compiler Optimisation Flags
 
-For production builds, the CMakeLists.txt file provides the following flags for aggressive optimisation:
+The CMakeLists.txt file provides aggressive optimisation flags:
 
-```bash
-GNU compiler:
--Ofast -march=native -mtune=native -flto
-
-Intel compiler:
--O3 -xHost
-```
+| Compiler | Flags |
+|----------|-------|
+| **GNU** | `-Ofast -march=native -mtune=native -flto` |
+| **Intel** | `-O3 -xHost` |
 
 ### BLAS/LAPACK Performance
 
-For best performance, use optimised BLAS implementations:
-- **Intel MKL**: Best for Intel CPUs
-- **OpenBLAS**: Good general-purpose choice
-- **ATLAS**: Auto-tuned alternative
+> [!TIP]
+> For optimal performance, use these BLAS implementations:
+> - **Intel MKL**: Best for Intel CPUs
+> - **OpenBLAS**: Good general-purpose choice
+> - **ATLAS**: Auto-tuned alternative
 
-Example with MKL:
+**Example with MKL:**
 ```bash
 cmake -DBLA_VENDOR=Intel10_64lp ..
 ```
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! Please follow these steps:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. 🍴 Fork the repository
+2. 🌿 Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. 💾 Commit your changes (`git commit -m 'Add amazing feature'`)
+4. 📤 Push to the branch (`git push origin feature/amazing-feature`)
+5. 🔀 Open a Pull Request
 
-### Code Style
+### Code Style Guidelines
 
-- Use 4-space indentation
-- Maximum line length: 100 characters
-- Use descriptive variable names
-- Add comments for complex algorithms
-- Follow existing module structure
+| Guideline | Requirement |
+|-----------|-------------|
+| Indentation | 4 spaces |
+| Line Length | 100 characters maximum |
+| Naming | Descriptive variable names |
+| Documentation | Comments for complex algorithms |
+| Structure | Follow existing module organisation |
 
-## Licence
+## 📄 Licence
 
-This project is licensed under the Apache V2.0 Licence - see the LICENCE file for details.
+This project is licensed under the Apache V2.0 Licence - see the [LICENCE](LICENSE) file for details.
 
-## Citation
+## 📝 Citation
 
 If you use this library in your research, please cite:
 
@@ -247,20 +285,20 @@ If you use this library in your research, please cite:
 }
 ```
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 - LAPACK and BLAS developers for linear algebra routines
 - The Fortran community for continued language development
 - Contributors and users of this library
 
-## Contact
+## 📬 Contact
 
 - **Issues**: [GitHub Issues](https://github.com/PolskaKrowa/nuclear-physics-library/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/PolskaKrowa/nuclear-physics-library/discussions)
 
-## Roadmap
+## 🗺️ Roadmap
 
-### Planned Features
+### 🔮 Planned Features
 - [ ] MPI parallelisation for distributed computing
 - [ ] Python bindings via f2py
 - [ ] I/O and Visualisation (HDF5, VTK, etc.)
@@ -269,24 +307,37 @@ If you use this library in your research, please cite:
 - [ ] Detailed fuel modelling
 - [ ] Enhanced testing suite (unit tests, benchmarks, verification tests)
 
-### In Progress
+### 🚧 In Progress
 - [ ] Additional reactor geometries (hexagonal, cylindrical)
 - [ ] Advanced turbulence models
 - [ ] OpenMP threading for shared-memory systems
+- [ ] Improved performance for real-time/faster-than-real-time simulation
 
-## Version History
+## 📋 Version History
 
-### v0.2.0 (current)
+<details>
+<summary><b>v0.2.0 (current)</b></summary>
+
 - Enhanced neutronics models
 - Improved fluid dynamics simulation
 - Consistent testing suite
+</details>
 
-### v0.1.0
+<details>
+<summary><b>v0.1.0</b></summary>
+
 - Initial release
 - Core utilities and mathematical kernels
 - Basic physics models (fluid, heat, fission, pressure)
 - Single-threaded implementation
+</details>
 
 ---
 
+<div align="center">
+
 **Note**: This library is intended for educational and research purposes.
+
+Made with ⚛️ by [Stevenson Parker](https://github.com/PolskaKrowa)
+
+</div>
