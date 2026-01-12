@@ -274,6 +274,7 @@ If you use this library in your research, please cite:
 - [ ] Additional reactor geometries (hexagonal, cylindrical)
 - [ ] Advanced turbulence models
 - [ ] OpenMP threading for shared-memory systems
+- [ ] Improved performance for real-time/faster-than-real-time simulation
 
 ## Version History
 
