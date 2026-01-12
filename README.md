@@ -187,7 +187,7 @@ sudo yum install gcc-gfortran cmake blas-devel lapack-devel
 
 ## 📁 Module Organisation
 
-```
+```graphql
 nuclear-physics-library/
 ├── 📦 core/                    # Foundational utilities
 │   ├── kinds.f90              # Precision definitions
