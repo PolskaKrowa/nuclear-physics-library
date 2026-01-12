@@ -1,6 +1,6 @@
 <div align="center" style="padding: 10px">
 
-<a href="">![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml) </a>
+<a href="">![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/PolskaKrowa/nuclear-physics-library/.github%2Fworkflows%2Fmain.yml)</a>
 <a href="">![GitHub License](https://img.shields.io/github/license/PolskaKrowa/nuclear-physics-library)</a>
 <a href="">![GitHub Release](https://img.shields.io/github/v/release/PolskaKrowa/nuclear-physics-library)</a>
 
@@ -126,11 +126,12 @@ You can do this by simply passing:
 -DBLAS_LIBRARIES=/path/to/libblas.so -DLAPACK_LIBRARIES=/path/to/liblapack.so
 ```
 to the CMake command.
-This program also supports compiling using OpenBLAS, which includes LAPACK in the same .so file, however both libraries must still be passed into the CMake command to ensure that the compiler is able to properly link the libraries to the program.
+> [!IMPORTANT]
+> This program also supports compiling using OpenBLAS, which includes LAPACK in the same .so file, however both libraries must still be passed into the CMake command to ensure that the compiler is able to properly link the libraries to the program.
 
 ## Module Organisation
 
-```
+```graphql
 nuclear-physics-library/
 ├── core/                    # Foundational utilities
 │   ├── kinds.f90           # Precision definitions
