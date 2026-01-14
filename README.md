@@ -338,6 +338,6 @@ If you use this library in your research, please cite:
 
 **Note**: This library is intended for educational and research purposes.
 
-Made with ⚛️ by [Stevenson Parker](https://github.com/PolskaKrowa)
+Made with ❤️ and 🧠 by [Stevenson Parker](https://github.com/PolskaKrowa)
 
 </div>
