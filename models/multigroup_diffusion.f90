@@ -241,11 +241,6 @@ contains
         state%outer_error = 1.0_wp
         state%inner_error = 1.0_wp
         state%converged = .false.
-        
-        ! Only reset cross-sections if requested
-        if (.not. keep_xsec) then
-            call reset_cross_sections(state)
-        end if
     end subroutine mg_reset
 
     subroutine mg_destroy(state)
