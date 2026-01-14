@@ -310,8 +310,8 @@ If you use this library in your research, please cite:
 ### 🚧 In Progress
 - [ ] Additional reactor geometries (hexagonal, cylindrical)
 - [ ] Advanced turbulence models
-- [ ] OpenMP threading for shared-memory systems
-- [ ] Improved performance for real-time/faster-than-real-time simulation
+- [x] OpenMP threading for shared-memory systems
+- [x] Improved performance for real-time/faster-than-real-time simulation
 
 ## 📋 Version History
 
