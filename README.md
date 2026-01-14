@@ -263,7 +263,7 @@ Contributions are welcome! Please follow these steps:
 | Guideline | Requirement |
 |-----------|-------------|
 | Indentation | 4 spaces |
-| Line Length | 100 characters maximum |
+| Line Length | 100 characters maximum (excluding indentation) |
 | Naming | Descriptive variable names |
 | Documentation | Comments for complex algorithms |
 | Structure | Follow existing module organisation |
