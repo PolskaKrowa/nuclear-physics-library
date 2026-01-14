@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NuclearPhysics VERSION 1.0.0 LANGUAGES Fortran C)
+project(NuclearPhysics VERSION 0.2.17 LANGUAGES Fortran C)
 
 # Set Fortran standards and flags
 set(CMAKE_Fortran_MODULE_DIRECTORY ${PROJECT_BINARY_DIR}/mod)
