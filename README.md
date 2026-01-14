@@ -216,7 +216,7 @@ nuclear-physics-library/
 
 ### Required
 - ✅ Fortran compiler (gfortran 9.0+ or Intel Fortran)
-- ✅ CMake 3.10+
+- ✅ CMake 3.20+
 - ✅ BLAS/LAPACK libraries
 
 ### Optional
