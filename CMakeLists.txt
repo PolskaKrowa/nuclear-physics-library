@@ -5,17 +5,18 @@ project(NuclearPhysics VERSION 1.0.0 LANGUAGES Fortran C)
 set(CMAKE_Fortran_MODULE_DIRECTORY ${PROJECT_BINARY_DIR}/mod)
 include_directories(${CMAKE_Fortran_MODULE_DIRECTORY})
 
+set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Profiling" CACHE STRING "" FORCE)
+
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=f2008 -fimplicit-none -Wall -Wextra")
-    set(CMAKE_Fortran_FLAGS_DEBUG "-O0 -g -fcheck=all -fbacktrace -fimplicit-none -fno-omit-frame-pointer -pedantic")
-    set(CMAKE_Fortran_FLAGS_RELEASE "-Ofast -march=native -mtune=native -flto")
+    set(CMAKE_Fortran_FLAGS_DEBUG "-O0 -g -fcheck=all -fbacktrace -fimplicit-none -fno-omit-frame-pointer -pedantic ")
+    set(CMAKE_Fortran_FLAGS_RELEASE "-Ofast -march=native -mtune=native -flto -ffpe-summary=none -fopenmp")
+    set(CMAKE_Fortran_FLAGS_PROFILING "-O3 -g -pg -fopenmp")
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -stand f08 -implicitnone -warn all")
     set(CMAKE_Fortran_FLAGS_DEBUG "-g -check all -traceback")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
-
-
 
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 add_compile_definitions(M_PI=3.14159265358979)
@@ -61,6 +62,27 @@ endif()
 message(STATUS "BLAS libraries: ${BLAS_LIBRARIES}")
 message(STATUS "LAPACK libraries: ${LAPACK_LIBRARIES}")
 
+# Find OpenGL and GLUT (optional for visualisation)
+option(BUILD_WITH_OPENGL "Build OpenGL visualisation examples" ON)
+
+if(BUILD_WITH_OPENGL)
+    find_package(OpenGL)
+    find_package(GLUT)
+    
+    if(OpenGL_FOUND AND GLUT_FOUND)
+        message(STATUS "OpenGL found: ${OPENGL_LIBRARIES}")
+        message(STATUS "GLUT found: ${GLUT_LIBRARIES}")
+        set(OPENGL_AVAILABLE TRUE)
+    else()
+        message(STATUS "OpenGL or GLUT not found - OpenGL examples will not be built")
+        message(STATUS "  To enable, install: sudo apt-get install freeglut3-dev mesa-common-dev")
+        set(OPENGL_AVAILABLE FALSE)
+    endif()
+else()
+    set(OPENGL_AVAILABLE FALSE)
+    message(STATUS "OpenGL support disabled by user")
+endif()
+
 # Core library
 add_subdirectory(core)
 
@@ -77,7 +99,7 @@ target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_phy
 # C Interface library
 add_subdirectory(interface)
 
-# BWR Core Simulator
+# BWR Core Simulator (console version)
 add_executable(bwr_core_simulator examples/bwr_core_simulator.f90)
 target_link_libraries(bwr_core_simulator 
     nuclear_physics_models 
@@ -88,6 +110,32 @@ target_link_libraries(bwr_core_simulator
 target_include_directories(bwr_core_simulator PRIVATE include)
 
 install(TARGETS bwr_core_simulator RUNTIME DESTINATION bin)
+
+# BWR Core Simulator with OpenGL (if available)
+if(OPENGL_AVAILABLE)
+    add_executable(bwr_core_simulator_opengl examples/bwr_core_simulator_opengl.f90)
+    
+    target_link_libraries(bwr_core_simulator_opengl 
+        nuclear_physics_models 
+        nuclear_physics_kernels 
+        nuclear_physics_core
+        ${LAPACK_LIBRARIES} 
+        ${BLAS_LIBRARIES}
+        ${OPENGL_LIBRARIES}
+        ${GLUT_LIBRARIES})
+    
+    target_include_directories(bwr_core_simulator_opengl PRIVATE 
+        include
+        ${OPENGL_INCLUDE_DIR}
+        ${GLUT_INCLUDE_DIR})
+    
+    # Add definitions for OpenGL
+    target_compile_definitions(bwr_core_simulator_opengl PRIVATE USE_OPENGL)
+    
+    install(TARGETS bwr_core_simulator_opengl RUNTIME DESTINATION bin)
+    
+    message(STATUS "OpenGL visualisation enabled - bwr_core_simulator_opengl will be built")
+endif()
 
 # Export configuration
 install(EXPORT NuclearPhysicsTargets
@@ -114,9 +162,9 @@ install(FILES
 
 # Installation summary
 message(STATUS "")
-message(STATUS "═══════════════════════════════════════════════════════")
+message(STATUS "")
 message(STATUS "  Nuclear Physics Library Configuration")
-message(STATUS "═══════════════════════════════════════════════════════")
+message(STATUS "═════════════════════════════════════════════════════")
 message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Fortran compiler: ${CMAKE_Fortran_COMPILER_ID}")
@@ -130,6 +178,11 @@ message(STATUS "    - nuclear_physics_models")
 message(STATUS "    - nuclear_physics_c (C interface)")
 message(STATUS "")
 message(STATUS "  Examples:")
-message(STATUS "    - bwr_core_simulator (Boiling Water Reactor)")
-message(STATUS "═══════════════════════════════════════════════════════")
+message(STATUS "    - bwr_core_simulator (console mode)")
+if(OPENGL_AVAILABLE)
+    message(STATUS "    - bwr_core_simulator_opengl (3D visualisation)")
+else()
+    message(STATUS "    - bwr_core_simulator_opengl (not available - missing OpenGL/GLUT)")
+endif()
+message(STATUS "═════════════════════════════════════════════════════")
 message(STATUS "")

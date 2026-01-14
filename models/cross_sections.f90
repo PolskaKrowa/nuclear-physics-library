@@ -36,7 +36,8 @@ module cross_sections
     public :: xslib_apply_xenon, xslib_apply_boron
     public :: xslib_create_two_group_fuel, xslib_create_two_group_moderator
     public :: compute_doppler_coefficient, compute_moderator_coefficient
-    public :: compute_xenon_worth, compute_samarium_worth
+    public :: compute_xenon_worth, compute_samarium_worth, xslib_get_material
+    public :: xslib_list_materials, xslib_apply_control_rod
     
     ! Maximum materials in library
     integer, parameter :: MAX_MATERIALS = 100
@@ -335,32 +336,36 @@ contains
     !> Apply xenon-135 poisoning
     subroutine xslib_apply_xenon(xsec, Xe_conc)
         type(mg_xsec_t), intent(inout) :: xsec
-        real(wp), intent(in) :: Xe_conc  ! atoms/barn-cm
-        
+        real(wp), intent(in) :: Xe_conc  ! Input is atoms/barn-cm
+
         real(wp) :: sigma_a_Xe_thermal
-        
+
         ! Xe-135 thermal absorption cross section: ~2.65e6 barns
-        sigma_a_Xe_thermal = 2.65e6_wp * 1.0e-24_wp  ! Convert to cm²
-        
+        ! CORRECTION: Keep in barns to match atoms/barn-cm input
+        sigma_a_Xe_thermal = 2.65e6_wp 
+
         ! Add to thermal group absorption
         if (xsec%n_groups >= 2) then
             xsec%sigma_a(xsec%n_groups) = xsec%sigma_a(xsec%n_groups) + &
                                           sigma_a_Xe_thermal * Xe_conc
+            
+            ! Also update removal cross-section (absorption is part of removal)
             xsec%sigma_r(xsec%n_groups) = xsec%sigma_r(xsec%n_groups) + &
                                           sigma_a_Xe_thermal * Xe_conc
         end if
     end subroutine xslib_apply_xenon
-    
+
     !> Apply samarium-149 poisoning
     subroutine xslib_apply_samarium(xsec, Sm_conc)
         type(mg_xsec_t), intent(inout) :: xsec
-        real(wp), intent(in) :: Sm_conc  ! atoms/barn-cm
-        
+        real(wp), intent(in) :: Sm_conc  ! Input is atoms/barn-cm
+
         real(wp) :: sigma_a_Sm_thermal
-        
+
         ! Sm-149 thermal absorption cross section: ~4.08e4 barns
-        sigma_a_Sm_thermal = 4.08e4_wp * 1.0e-24_wp  ! Convert to cm²
-        
+        ! CORRECTION: Keep in barns
+        sigma_a_Sm_thermal = 4.08e4_wp 
+
         ! Add to thermal group absorption
         if (xsec%n_groups >= 2) then
             xsec%sigma_a(xsec%n_groups) = xsec%sigma_a(xsec%n_groups) + &
@@ -370,24 +375,55 @@ contains
         end if
     end subroutine xslib_apply_samarium
     
+    !> Apply Control Rods
+    !> Adds strong absorption to represent a B4C or Hafnium blade
+    subroutine xslib_apply_control_rod(xsec, rod_fraction)
+        type(mg_xsec_t), intent(inout) :: xsec
+        real(wp), intent(in) :: rod_fraction ! 0.0 (empty) to 1.0 (full blade)
+
+        real(wp) :: delta_sigma_a_fast, delta_sigma_a_thermal
+        
+        ! Macroscopic worth constants [cm^-1]
+        ! These are "black" absorbers relative to fuel
+        delta_sigma_a_fast    = 0.015_wp   ! Small effect in fast group
+        delta_sigma_a_thermal = 0.150_wp   ! Massive effect in thermal group
+
+        ! Linearly weight by how much rod is in this specific node
+        if (rod_fraction > 0.0_wp) then
+            ! Update Fast Group
+            xsec%sigma_a(1) = xsec%sigma_a(1) + (delta_sigma_a_fast * rod_fraction)
+            xsec%sigma_r(1) = xsec%sigma_r(1) + (delta_sigma_a_fast * rod_fraction)
+            
+            ! Update Thermal Group
+            xsec%sigma_a(2) = xsec%sigma_a(2) + (delta_sigma_a_thermal * rod_fraction)
+            xsec%sigma_r(2) = xsec%sigma_r(2) + (delta_sigma_a_thermal * rod_fraction)
+        end if
+    end subroutine xslib_apply_control_rod
+
     !> Apply soluble boron
     subroutine xslib_apply_boron(xsec, boron_ppm, boron_worth)
         type(mg_xsec_t), intent(inout) :: xsec
         real(wp), intent(in) :: boron_ppm
         real(wp), intent(in), optional :: boron_worth
-        
-        real(wp) :: sigma_a_B10, N_B10, worth
-        
-        worth = -8.0_wp  ! Default: -8 pcm/ppm
-        if (present(boron_worth)) worth = boron_worth
-        
+
+        real(wp) :: sigma_a_B10, N_B10
+
         ! B-10 thermal absorption: ~3840 barns
-        sigma_a_B10 = 3840.0_wp * 1.0e-24_wp
+        ! CORRECTION: Keep in barns
+        sigma_a_B10 = 3840.0_wp 
+
+        ! Calculate Number Density
+        ! ppm = parts per million by mass (g B / 1e6 g Water)
+        ! Density of water approx 0.74 g/cm^3 at operating conditions
+        ! N = (ppm * 1e-6) * rho_water * Abundance * N_Avogadro / AtomicWeight
         
-        ! Number density from ppm (assuming water density 0.7 g/cm³)
-        ! ppm = mg/kg, so for 1 ppm: ~6e-6 g/cm³ of boron
-        N_B10 = boron_ppm * 6.0e-6_wp * 0.2_wp * N_AVOGADRO / 10.8_wp  ! 20% B-10 abundance
-        
+        ! Note: We multiply by 1.0e-24 to convert from atoms/cm^3 to atoms/barn-cm
+        N_B10 = (boron_ppm * 1.0e-6_wp) * &        ! mass fraction
+                0.74_wp * &                        ! water density (g/cm^3)
+                0.20_wp * &                        ! B-10 abundance (20%)
+                (N_AVOGADRO / 10.81_wp) * &        ! moles/g
+                1.0e-24_wp                         ! CONVERSION: cm^-3 -> (barn-cm)^-1
+
         ! Add to thermal absorption
         if (xsec%n_groups >= 2) then
             xsec%sigma_a(xsec%n_groups) = xsec%sigma_a(xsec%n_groups) + sigma_a_B10 * N_B10
@@ -424,122 +460,205 @@ contains
             xsec%sigma_r(g) = xsec%sigma_r(g) * factor
         end do
     end subroutine apply_burnup_effects
-    
-    subroutine xslib_create_two_group_fuel(xsec_fuel, enrichment)
-        type(mg_xsec_t), intent(out) :: xsec_fuel
-        real(wp), intent(in), optional :: enrichment
+
+    subroutine xslib_get_material(library, material_name, material, found)
+        type(xsec_library_t), intent(in)  :: library
+        character(len=*),     intent(in)  :: material_name
+        type(xsec_material_t), intent(out) :: material
+        logical,               intent(out) :: found
+
+        integer :: i
+        found = .false.
+
+        do i = 1, library%n_materials
+            if (trim(adjustl(library%materials(i)%name)) == trim(adjustl(material_name))) then
+                material = library%materials(i)
+                found = .true.
+                return
+            end if
+        end do
+
+        ! not found: print diagnostics (helpful during debugging) but do not leave material uninitialised
+        print *, 'xslib_get_material: material "', trim(material_name), '" not found in library.'
+        print *, 'Available materials:'
+        do i = 1, library%n_materials
+            print *, '  - ', trim(library%materials(i)%name)
+        end do
+    end subroutine xslib_get_material
+
+    subroutine xslib_list_materials(library)
+        type(xsec_library_t), intent(in) :: library
+        integer :: i
+        print *, 'xslib: material list (', library%n_materials, '):'
+        do i = 1, library%n_materials
+            print *, '  ', trim(library%materials(i)%name)
+        end do
+    end subroutine xslib_list_materials
+
+    subroutine xslib_create_two_group_fuel(xsec, enrichment)
+        type(mg_xsec_t), intent(out) :: xsec
+        real(wp), intent(in) :: enrichment
         
-        real(wp) :: enrich, scale_fast, scale_thermal
-        real(wp), parameter :: NU_U235 = 2.43_wp  ! Average neutrons per fission
+        real(wp) :: f_U235, f_U238
         
-        enrich = 0.035_wp  ! Default 3.5%
-        if (present(enrichment)) enrich = enrichment
+        xsec%n_groups = 2
         
-        ! Enrichment scaling factors (relative to 3.5%)
-        scale_fast = enrich / 0.035_wp
-        scale_thermal = enrich / 0.035_wp
+        allocate(xsec%D(2))
+        allocate(xsec%sigma_t(2))
+        allocate(xsec%sigma_a(2))
+        allocate(xsec%sigma_f(2))
+        allocate(xsec%nu_sigma_f(2))
+        allocate(xsec%sigma_r(2))
+        allocate(xsec%chi(2))
+        allocate(xsec%kappa(2))
+        allocate(xsec%sigma_s(2, 2))
+        allocate(xsec%chi_d(2))
         
-        xsec_fuel%n_groups = 2
-        
-        allocate(xsec_fuel%D(2))
-        allocate(xsec_fuel%sigma_t(2))
-        allocate(xsec_fuel%sigma_a(2))
-        allocate(xsec_fuel%sigma_f(2))
-        allocate(xsec_fuel%nu_sigma_f(2))
-        allocate(xsec_fuel%sigma_r(2))
-        allocate(xsec_fuel%chi(2))
-        allocate(xsec_fuel%kappa(2))
-        allocate(xsec_fuel%sigma_s(2, 2))
-        allocate(xsec_fuel%chi_d(2))
+        ! Enrichment fractions
+        f_U235 = enrichment
+        f_U238 = 1.0_wp - enrichment
         
         ! ========================================================================
-        ! REALISTIC BWR FUEL (UO2 3.5%, homogenized fuel pin cell)
-        ! These are typical values from lattice physics codes
-        ! Key: nu*sigma_f = NU_U235 * sigma_f (keep nu constant!)
+        ! GROUP 1: FAST (E > 0.625 eV)
         ! ========================================================================
         
-        ! Group 1: Fast (> 0.625 eV)
-        xsec_fuel%D(1) = 1.268_wp                           ! Diffusion coefficient [cm]
-        xsec_fuel%sigma_a(1) = 0.0103_wp                    ! Absorption [cm^-1]
-        xsec_fuel%sigma_f(1) = 0.0027_wp * scale_fast       ! Fission [cm^-1]
-        xsec_fuel%nu_sigma_f(1) = NU_U235 * xsec_fuel%sigma_f(1)  ! Production (nu=2.43)
-        xsec_fuel%chi(1) = 1.0_wp                           ! All fission neutrons born fast
-        xsec_fuel%kappa(1) = 200.0_wp                       ! Energy per fission [MeV]
+        xsec%D(1) = 1.50_wp
+        xsec%sigma_t(1) = 0.28_wp
+        xsec%sigma_a(1) = 0.001_wp
         
-        ! Group 2: Thermal (< 0.625 eV)  
-        xsec_fuel%D(2) = 0.3543_wp                          ! Diffusion coefficient [cm]
-        xsec_fuel%sigma_a(2) = 0.0963_wp                    ! Absorption
-        xsec_fuel%sigma_f(2) = 0.0654_wp * scale_thermal    ! Fission
-        xsec_fuel%nu_sigma_f(2) = NU_U235 * xsec_fuel%sigma_f(2)  ! Production (nu=2.43)
-        xsec_fuel%chi(2) = 0.0_wp                           ! No thermal fission neutrons
-        xsec_fuel%kappa(2) = 200.0_wp
+        ! Fission is also small in fast group, derived from coefficients
+        xsec%sigma_f(1) = 0.0053_wp * f_U235
+        xsec%nu_sigma_f(1) = 2.50_wp * xsec%sigma_f(1)
+        xsec%chi(1) = 1.0_wp
+        xsec%kappa(1) = 200.0_wp
         
-        ! Scattering matrix (from -> to) [cm^-1]
-        xsec_fuel%sigma_s(1,1) = 0.0244_wp  ! Fast -> Fast (within-group)
-        xsec_fuel%sigma_s(1,2) = 0.0186_wp  ! Fast -> Thermal (moderation/slowing down)
-        xsec_fuel%sigma_s(2,1) = 0.0_wp     ! Thermal -> Fast (no upscatter)
-        xsec_fuel%sigma_s(2,2) = 0.452_wp   ! Thermal -> Thermal
+        ! ========================================================================
+        ! GROUP 2: THERMAL (E < 0.625 eV)
+        ! ========================================================================
         
-        ! Compute removal cross-section: Σ_r = Σ_a + Σ_scatter-out
-        xsec_fuel%sigma_r(1) = xsec_fuel%sigma_a(1) + xsec_fuel%sigma_s(1,2)
-        xsec_fuel%sigma_r(2) = xsec_fuel%sigma_a(2) + xsec_fuel%sigma_s(2,1)
+        xsec%D(2) = 0.40_wp
+        xsec%sigma_t(2) = 1.50_wp
         
-        ! Total cross-section
-        xsec_fuel%sigma_t(1) = xsec_fuel%sigma_a(1) + sum(xsec_fuel%sigma_s(1,:))
-        xsec_fuel%sigma_t(2) = xsec_fuel%sigma_a(2) + sum(xsec_fuel%sigma_s(2,:))
+        ! Macroscopic absorption (Capture + Fission):
+        xsec%sigma_a(2) = f_U235 * 0.02354_wp * 681.0_wp + &
+                          f_U238 * 0.02354_wp * 2.7_wp
         
-        xsec_fuel%chi_d = xsec_fuel%chi
+        ! Fission cross-section:
+        xsec%sigma_f(2) = f_U235 * 0.02354_wp * 584.0_wp
+        
+        ! Production (nu*sigma_f)
+        xsec%nu_sigma_f(2) = 2.42_wp * xsec%sigma_f(2)
+        
+        xsec%chi(2) = 0.0_wp
+        xsec%kappa(2) = 200.0_wp
+        
+        ! ========================================================================
+        ! SCATTERING MATRIX [cm^-1]
+        ! ========================================================================
+        
+        xsec%sigma_s(1, 1) = 0.260_wp
+        xsec%sigma_s(1, 2) = 0.012_wp
+        xsec%sigma_s(2, 1) = 0.0_wp
+        xsec%sigma_s(2, 2) = 1.35_wp
+        
+        ! Compute removal cross-section
+        xsec%sigma_r(1) = xsec%sigma_a(1) + xsec%sigma_s(1, 2)
+        xsec%sigma_r(2) = xsec%sigma_a(2)
+        
+        ! Delayed neutron data
+        xsec%beta_total = 0.0065_wp
+        xsec%chi_d(1) = 1.0_wp
+        xsec%chi_d(2) = 0.0_wp
+        
+        ! (Optional: Print updated values to verify they are now ~0.1 instead of ~1e-25)
+        print *, "Created UO2 fuel cross-sections:"
+        print '(A,F6.4)', "  Enrichment:        ", enrichment * 100.0_wp, "%"
+        print '(A,ES11.4)', "  sigma_a(thermal):  ", xsec%sigma_a(2), " cm^-1"
+        print '(A,ES11.4)', "  nu*sf(thermal):    ", xsec%nu_sigma_f(2), " cm^-1"
+
     end subroutine xslib_create_two_group_fuel
 
-    subroutine xslib_create_two_group_moderator(xsec_water)
-        type(mg_xsec_t), intent(out) :: xsec_water
+    subroutine xslib_create_two_group_moderator(xsec)
+        type(mg_xsec_t), intent(out) :: xsec
         
-        xsec_water%n_groups = 2
+        xsec%n_groups = 2
         
-        allocate(xsec_water%D(2))
-        allocate(xsec_water%sigma_t(2))
-        allocate(xsec_water%sigma_a(2))
-        allocate(xsec_water%sigma_f(2))
-        allocate(xsec_water%nu_sigma_f(2))
-        allocate(xsec_water%sigma_r(2))
-        allocate(xsec_water%chi(2))
-        allocate(xsec_water%kappa(2))
-        allocate(xsec_water%sigma_s(2, 2))
-        allocate(xsec_water%chi_d(2))
+        allocate(xsec%D(2))
+        allocate(xsec%sigma_t(2))
+        allocate(xsec%sigma_a(2))
+        allocate(xsec%sigma_f(2))
+        allocate(xsec%nu_sigma_f(2))
+        allocate(xsec%sigma_r(2))
+        allocate(xsec%chi(2))
+        allocate(xsec%kappa(2))
+        allocate(xsec%sigma_s(2, 2))
+        allocate(xsec%chi_d(2))
         
         ! ========================================================================
-        ! REALISTIC WATER/MODERATOR (at BWR conditions: 7 MPa, ~280°C)
+        ! GROUP 1: FAST (E > 0.625 eV)
         ! ========================================================================
         
-        ! Group 1: Fast
-        xsec_water%D(1) = 1.592_wp               ! Diffusion coefficient [cm]
-        xsec_water%sigma_a(1) = 0.000311_wp      ! Very low fast absorption
+        xsec%D(1) = 1.30_wp
+        xsec%sigma_t(1) = 1.10_wp
         
-        ! Group 2: Thermal  
-        xsec_water%D(2) = 0.2772_wp              ! Lower D in thermal
-        xsec_water%sigma_a(2) = 0.0221_wp        ! Thermal absorption (H capture)
+        ! Water absorption in fast group (very small)
+        xsec%sigma_a(1) = 0.0001_wp  ! Mostly potential scattering
         
-        ! No fission in moderator
-        xsec_water%sigma_f = 0.0_wp
-        xsec_water%nu_sigma_f = 0.0_wp
-        xsec_water%chi = 0.0_wp
-        xsec_water%kappa = 0.0_wp
+        ! No fission in water
+        xsec%sigma_f(1) = 0.0_wp
+        xsec%nu_sigma_f(1) = 0.0_wp
+        xsec%chi(1) = 0.0_wp
+        xsec%kappa(1) = 0.0_wp
         
-        ! Strong scattering (water is excellent moderator)
-        xsec_water%sigma_s(1,1) = 0.0571_wp  ! Fast -> Fast
-        xsec_water%sigma_s(1,2) = 0.5408_wp  ! Fast -> Thermal (STRONG moderation)
-        xsec_water%sigma_s(2,1) = 0.0_wp     ! Thermal -> Fast
-        xsec_water%sigma_s(2,2) = 1.6970_wp  ! Thermal -> Thermal (strong scattering)
+        ! ========================================================================
+        ! GROUP 2: THERMAL (E < 0.625 eV)
+        ! ========================================================================
         
-        ! Removal cross-section
-        xsec_water%sigma_r(1) = xsec_water%sigma_a(1) + xsec_water%sigma_s(1,2)
-        xsec_water%sigma_r(2) = xsec_water%sigma_a(2)
+        xsec%D(2) = 0.16_wp
+        xsec%sigma_t(2) = 3.50_wp
         
-        ! Total cross-section
-        xsec_water%sigma_t(1) = xsec_water%sigma_a(1) + sum(xsec_water%sigma_s(1,:))
-        xsec_water%sigma_t(2) = xsec_water%sigma_a(2) + sum(xsec_water%sigma_s(2,:))
+        ! Water thermal absorption (THIS IS CRITICAL!)
+        ! H-1: σ_a ~ 0.332 barns at 0.0253 eV
+        ! At liquid water density (0.74 g/cm³ at BWR conditions):
+        !   N_H = 0.74 * 6.022e23 / 18 * 2 = 4.94e22 atoms/cm³
+        !   σ_a = N * σ = 4.94e22 * 0.332e-24 = 0.0164 cm⁻¹
+        xsec%sigma_a(2) = 0.0196_wp  ! Includes temperature correction
         
-        xsec_water%chi_d = 0.0_wp
+        ! No fission in water
+        xsec%sigma_f(2) = 0.0_wp
+        xsec%nu_sigma_f(2) = 0.0_wp
+        xsec%chi(2) = 0.0_wp
+        xsec%kappa(2) = 0.0_wp
+        
+        ! ========================================================================
+        ! SCATTERING MATRIX
+        ! ========================================================================
+        
+        ! Fast-to-fast (elastic scattering)
+        xsec%sigma_s(1, 1) = 1.05_wp
+        
+        ! Fast-to-thermal (slowing down - VERY IMPORTANT for moderation!)
+        xsec%sigma_s(1, 2) = 0.048_wp
+        
+        ! Thermal-to-fast (negligible upscatter)
+        xsec%sigma_s(2, 1) = 0.0_wp
+        
+        ! Thermal-to-thermal (elastic + inelastic)
+        xsec%sigma_s(2, 2) = 3.48_wp
+        
+        ! Compute removal
+        xsec%sigma_r(1) = xsec%sigma_a(1) + xsec%sigma_s(1, 2)
+        xsec%sigma_r(2) = xsec%sigma_a(2)
+        
+        ! No delayed neutrons from water
+        xsec%beta_total = 0.0_wp
+        xsec%chi_d = 0.0_wp
+        
+        print *, "Created water moderator cross-sections:"
+        print '(A,ES11.4)', "  σ_a(fast):         ", xsec%sigma_a(1), " cm⁻¹"
+        print '(A,ES11.4)', "  σ_a(thermal):      ", xsec%sigma_a(2), " cm⁻¹"
+        print '(A,ES11.4)', "  σ_s(1→2):          ", xsec%sigma_s(1, 2), " cm⁻¹"
+        
     end subroutine xslib_create_two_group_moderator
     
     !> Compute Doppler coefficient
