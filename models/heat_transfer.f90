@@ -245,6 +245,8 @@ contains
         real(wp), allocatable :: dT_dx(:, :, :), dT_dy(:, :, :), dT_dz(:, :, :)
         integer :: i, j, k
         real(wp) :: alpha, rho_cp, diffusion, convection, source
+        real(wp) :: h_conv, T_fluid, q_conv  ! Convective cooling variables
+        real(wp) :: D_equiv, A_over_V        ! Geometry variables
         
         allocate(laplacian(state%nx, state%ny, state%nz))
         
@@ -259,10 +261,19 @@ contains
             allocate(dT_dy(state%nx, state%ny, state%nz))
             allocate(dT_dz(state%nx, state%ny, state%nz))
             
-            ! Compute gradients
             call compute_gradient_3d(state%T, dT_dx, dT_dy, dT_dz, &
                                     state%dx, state%dy, state%dz)
         end if
+        
+        ! Geometry parameters for convective cooling
+        D_equiv = 0.01_wp      ! 10 mm equivalent diameter
+        A_over_V = 4.0_wp / D_equiv  ! Surface area to volume ratio [1/m]
+        
+        ! Heat transfer coefficient (typical BWR value)
+        h_conv = 30000.0_wp    ! W/m²·K
+        
+        ! Coolant temperature (approximation)
+        T_fluid = 558.0_wp     ! Saturation at 7 MPa
         
         ! Update temperature field
         do k = 1, state%nz
@@ -270,25 +281,32 @@ contains
                 do i = 1, state%nx
                     alpha = state%material(i, j, k)%thermal_diffusivity
                     rho_cp = state%material(i, j, k)%density * &
-                             state%material(i, j, k)%specific_heat
+                            state%material(i, j, k)%specific_heat
                     
                     ! Diffusion
                     diffusion = alpha * laplacian(i, j, k)
                     
-                    ! Convection
+                    ! Convection (fluid flow)
                     convection = 0.0_wp
                     if (state%config%include_convection) then
                         convection = -(state%vx(i, j, k) * dT_dx(i, j, k) + &
-                                      state%vy(i, j, k) * dT_dy(i, j, k) + &
-                                      state%vz(i, j, k) * dT_dz(i, j, k))
+                                    state%vy(i, j, k) * dT_dy(i, j, k) + &
+                                    state%vz(i, j, k) * dT_dz(i, j, k))
                     end if
                     
-                    ! Source term
-                    source = state%Q(i, j, k) / rho_cp
+                    ! Convective heat removal to coolant [W/m³]
+                    q_conv = h_conv * A_over_V * (state%T(i, j, k) - T_fluid)
+                    
+                    ! Source term (includes heat generation minus cooling)
+                    source = state%Q(i, j, k) / rho_cp - q_conv / rho_cp
                     
                     ! Explicit Euler update
                     state%T(i, j, k) = state%T(i, j, k) + dt * &
                         (diffusion + convection + source)
+                    
+                    ! Prevent unphysical temperatures
+                    state%T(i, j, k) = max(state%T(i, j, k), 300.0_wp)  ! Min 300 K
+                    state%T(i, j, k) = min(state%T(i, j, k), 3000.0_wp) ! Max 3000 K
                 end do
             end do
         end do

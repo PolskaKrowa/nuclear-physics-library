@@ -23,7 +23,7 @@
 !
 module cross_sections
     use kinds, only: wp, i32
-    use constants, only: TOL_DEFAULT, N_AVOGADRO
+    use constants, only: TOL_DEFAULT, N_AVOGADRO, PI
     use multigroup_diffusion, only: mg_xsec_t
     implicit none
     private
@@ -500,7 +500,12 @@ contains
         real(wp), intent(in) :: enrichment
         
         real(wp) :: f_U235, f_U238
-        
+        real(wp) :: V_fuel, V_mod, f_fuel  ! Volume fractions
+        real(wp) :: pitch, r_fuel
+
+        real(wp) :: sigma_a_fuel, sigma_f_fuel, N_U
+        real(wp) :: sigma_a_water
+
         xsec%n_groups = 2
         
         allocate(xsec%D(2))
@@ -518,35 +523,66 @@ contains
         f_U235 = enrichment
         f_U238 = 1.0_wp - enrichment
         
+        ! Compute fuel volume fraction for homogenization
+        pitch = 0.0163_wp    ! 1.63 cm BWR pin pitch
+        r_fuel = 0.0052_wp   ! 5.2 mm fuel radius
+        
+        ! Fuel volume fraction in lattice
+        ! (Requires PI to be imported or defined)
+        V_fuel = PI * r_fuel**2
+        V_mod = pitch**2 - V_fuel
+        f_fuel = V_fuel / (V_fuel + V_mod)
+        
+        print '(A,F6.4)', "  Fuel volume fraction: ", f_fuel
+        
         ! ========================================================================
         ! GROUP 1: FAST (E > 0.625 eV)
         ! ========================================================================
         
-        xsec%D(1) = 1.50_wp
-        xsec%sigma_t(1) = 0.28_wp
-        xsec%sigma_a(1) = 0.001_wp
+        ! Homogenized diffusion coefficient
+        xsec%D(1) = f_fuel * 1.50_wp + (1.0_wp - f_fuel) * 1.30_wp
         
-        ! Fission is also small in fast group, derived from coefficients
-        xsec%sigma_f(1) = 0.0053_wp * f_U235
+        ! Total cross-section
+        xsec%sigma_t(1) = 0.28_wp
+        
+        ! CRITICAL: Homogenized absorption
+        xsec%sigma_a(1) = f_fuel * 0.001_wp + (1.0_wp - f_fuel) * 0.0001_wp
+        
+        ! Fast fission
+        xsec%sigma_f(1) = f_fuel * f_U235 * 0.0053_wp
         xsec%nu_sigma_f(1) = 2.50_wp * xsec%sigma_f(1)
+        
+        ! All fast neutrons born in fast group
         xsec%chi(1) = 1.0_wp
         xsec%kappa(1) = 200.0_wp
         
         ! ========================================================================
-        ! GROUP 2: THERMAL (E < 0.625 eV)
+        ! GROUP 2: THERMAL (E < 0.625 eV)  
         ! ========================================================================
         
-        xsec%D(2) = 0.40_wp
+        ! Homogenized diffusion coefficient
+        xsec%D(2) = f_fuel * 0.40_wp + (1.0_wp - f_fuel) * 0.16_wp
+        
         xsec%sigma_t(2) = 1.50_wp
         
-        ! Macroscopic absorption (Capture + Fission):
-        xsec%sigma_a(2) = f_U235 * 0.02354_wp * 681.0_wp + &
-                          f_U238 * 0.02354_wp * 2.7_wp
+        ! CRITICAL FIX: Homogenized macroscopic cross-sections
+        ! These are averaged over fuel + moderator volumes
         
-        ! Fission cross-section:
-        xsec%sigma_f(2) = f_U235 * 0.02354_wp * 584.0_wp
+        ! Fuel contribution (using proper number density)
+        N_U = 0.02354_wp  ! atoms/barn-cm
         
-        ! Production (nu*sigma_f)
+        ! Macroscopic XS for pure fuel [cm^-1]
+        sigma_a_fuel = N_U * (f_U235 * 681.0_wp + f_U238 * 2.7_wp)
+        sigma_f_fuel = N_U * f_U235 * 584.0_wp
+        
+        ! Water absorption: σ_a,water ≈ 0.0196 cm^-1
+        sigma_a_water = 0.0196_wp
+        
+        ! HOMOGENIZED cross-sections (volume-weighted)
+        xsec%sigma_a(2) = f_fuel * sigma_a_fuel + (1.0_wp - f_fuel) * sigma_a_water
+        xsec%sigma_f(2) = f_fuel * sigma_f_fuel
+        
+        ! Production
         xsec%nu_sigma_f(2) = 2.42_wp * xsec%sigma_f(2)
         
         xsec%chi(2) = 0.0_wp
@@ -556,10 +592,17 @@ contains
         ! SCATTERING MATRIX [cm^-1]
         ! ========================================================================
         
-        xsec%sigma_s(1, 1) = 0.260_wp
-        xsec%sigma_s(1, 2) = 0.012_wp
+        ! Fast-to-fast (homogenized)
+        xsec%sigma_s(1, 1) = f_fuel * 0.260_wp + (1.0_wp - f_fuel) * 1.05_wp
+        
+        ! CRITICAL: Fast-to-thermal slowing down (mostly in water!)
+        xsec%sigma_s(1, 2) = (1.0_wp - f_fuel) * 0.048_wp + f_fuel * 0.012_wp
+        
+        ! No upscatter
         xsec%sigma_s(2, 1) = 0.0_wp
-        xsec%sigma_s(2, 2) = 1.35_wp
+        
+        ! Thermal-to-thermal (mostly water)
+        xsec%sigma_s(2, 2) = f_fuel * 1.35_wp + (1.0_wp - f_fuel) * 3.48_wp
         
         ! Compute removal cross-section
         xsec%sigma_r(1) = xsec%sigma_a(1) + xsec%sigma_s(1, 2)
@@ -570,12 +613,14 @@ contains
         xsec%chi_d(1) = 1.0_wp
         xsec%chi_d(2) = 0.0_wp
         
-        ! (Optional: Print updated values to verify they are now ~0.1 instead of ~1e-25)
-        print *, "Created UO2 fuel cross-sections:"
+        ! Verification printout
+        print *, "Created HOMOGENIZED UO2 fuel cross-sections:"
         print '(A,F6.4)', "  Enrichment:        ", enrichment * 100.0_wp, "%"
-        print '(A,ES11.4)', "  sigma_a(thermal):  ", xsec%sigma_a(2), " cm^-1"
-        print '(A,ES11.4)', "  nu*sf(thermal):    ", xsec%nu_sigma_f(2), " cm^-1"
-
+        print '(A,ES11.4)', "  σ_a(thermal):      ", xsec%sigma_a(2), " cm^-1"
+        print '(A,ES11.4)', "  σ_f(thermal):      ", xsec%sigma_f(2), " cm^-1"
+        print '(A,ES11.4)', "  ν*σ_f(thermal):    ", xsec%nu_sigma_f(2), " cm^-1"
+        print '(A,F6.3)', "  k-infinity est:    ", xsec%nu_sigma_f(2) / xsec%sigma_a(2)
+        
     end subroutine xslib_create_two_group_fuel
 
     subroutine xslib_create_two_group_moderator(xsec)

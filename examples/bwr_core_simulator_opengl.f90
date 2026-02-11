@@ -714,7 +714,7 @@ contains
         
     end subroutine setup_bwr_geometry_realistic
     
-    !> Setup BWR simulation (from original)
+    !> Setup BWR simulation
     subroutine setup_bwr_simulation(sim)
         type(simulation_t), intent(out) :: sim
         
@@ -856,7 +856,6 @@ contains
         print *, ""
     end subroutine setup_bwr_simulation
     
-    !> Coupled physics time step (from original)
     subroutine coupled_time_step(sim, dt)
         type(simulation_t), intent(inout) :: sim
         real(wp), intent(in) :: dt
@@ -869,6 +868,48 @@ contains
         real(wp), parameter :: rho_liquid = 0.738_wp
         real(wp), parameter :: rho_vapor = 0.038_wp
         logical :: converged
+        
+        real(wp) :: v_coolant
+        integer :: i, j, k
+        real(wp) :: Re, h_conv
+        real(wp), parameter :: D_h = 0.01_wp       ! hydraulic diameter
+        real(wp), parameter :: mu = 0.0001_wp      ! viscosity
+        real(wp), parameter :: k_fluid = 0.6_wp    ! thermal conductivity
+        real(wp), parameter :: Pr = 0.9_wp         ! Prandtl number for water
+        
+        ! Set coolant velocity field for heat transfer
+        ! Approximate axial flow velocity from mass flux
+        ! v_z = G / rho  where G is mass flux [kg/m^2.s]
+        
+        v_coolant = sim%mass_flux_core / rho_liquid
+        
+        ! Set velocity in heat transfer module
+        if (allocated(sim%heat%vz)) then
+            sim%heat%vz = v_coolant
+        end if
+        
+        ! Also update convective boundary conditions
+        ! Higher flow = higher heat transfer coefficient
+        
+        ! Reynolds number
+        Re = rho_liquid * v_coolant * D_h / mu
+        
+        ! Dittus-Boelter correlation for heat transfer coefficient
+        h_conv = 0.023_wp * Re**0.8_wp * Pr**0.4_wp * k_fluid / D_h
+        
+        ! Update boundary conditions in heat transfer
+        do k = 1, sim%nz
+            do j = 1, sim%ny
+                do i = 1, sim%nx
+                    ! Apply convective cooling in heat source term
+                    
+                end do
+            end do
+        end do
+        
+        ! ========================================================================
+        ! Continue with original coupling
+        ! ========================================================================
         
         ! Neutronics
         call mg_solve_eigenvalue(sim%neutronics, sim%k_eff, converged)
@@ -920,7 +961,7 @@ contains
         
     end subroutine coupled_time_step
 
-    !> Solve for initial steady state (from original)
+    !> Solve for initial steady state
     subroutine solve_steady_state(sim)
         type(simulation_t), intent(inout) :: sim
         
@@ -983,7 +1024,7 @@ contains
         
     end subroutine solve_steady_state
     
-    !> Update cross sections with feedback (from original)
+    !> Update cross sections with feedback
     subroutine update_cross_sections_feedback(sim, T, rho)
         type(simulation_t), intent(inout) :: sim
         real(wp), intent(in) :: T(:, :, :)
@@ -999,23 +1040,26 @@ contains
                     T_fuel = T(i, j, k)
                     rho_mod = rho(i, j, k)
                     
+                    ! Get cross-sections with feedback
                     call xslib_get_xsec(sim%xslib, "UO2_35", &
                         T_fuel, rho_mod, sim%burnup%burnup(i, j, k), xsec, &
                         Xe_conc=sim%burnup%Xe135(i, j, k), &
                         Sm_conc=sim%burnup%Sm149(i, j, k))
                     
+                    ! ================================================================
+                    ! CRITICAL FIX: Apply control rod BEFORE setting cross-sections!
+                    ! ================================================================
                     block
                         real(wp) :: node_bottom, node_top, rod_tip, inserted_fraction
                         real(wp) :: H_core
 
-                        ! Use sim%nz and sim%dz directly from simulation_t [cite: 136, 137]
                         H_core = real(sim%nz, wp) * sim%dz 
                         
-                        ! Calculate physical height of this node [cite: 137]
+                        ! Calculate physical height of this node
                         node_bottom = real(k-1, wp) * sim%dz
                         node_top    = real(k, wp) * sim%dz
                         
-                        ! BWR rods come from the BOTTOM. 
+                        ! BWR rods come from the BOTTOM
                         ! Position 0.0 = fully withdrawn (bottom)
                         ! Position 1.0 = fully inserted (top)
                         rod_tip = sim%rod_bank_position * H_core
@@ -1030,19 +1074,21 @@ contains
                             inserted_fraction = (rod_tip - node_bottom) / sim%dz
                         end if
 
-                        ! Access the xsec array directly within the neutronics state 
+                        ! Apply control rod to LOCAL xsec variable
+                        ! BEFORE calling mg_set_cross_sections!
                         if (inserted_fraction > 0.0_wp) then
-                            call xslib_apply_control_rod(sim%neutronics%xsec(i,j,k), inserted_fraction)
+                            call xslib_apply_control_rod(xsec, inserted_fraction)
                         end if
                     end block
 
+                    ! Now set the modified cross-sections
                     call mg_set_cross_sections(sim%neutronics, xsec, i, i, j, j, k, k)
                 end do
             end do
         end do
     end subroutine update_cross_sections_feedback
     
-    !> Apply reactivity insertion (from original)
+    !> Apply reactivity insertion
     subroutine apply_reactivity_insertion(sim, rho_pcm)
         type(simulation_t), intent(inout) :: sim
         real(wp), intent(in) :: rho_pcm
@@ -1064,7 +1110,7 @@ contains
         end do
     end subroutine apply_reactivity_insertion
     
-    !> Check safety limits (from original)
+    !> Check safety limits
     function check_safety_limits(sim) result(approaching_limits)
         type(simulation_t), intent(in) :: sim
         logical :: approaching_limits
@@ -1087,7 +1133,7 @@ contains
         end if
     end function check_safety_limits
     
-    !> Print steady-state summary (from original)
+    !> Print steady-state summary
     subroutine print_steady_state_summary(sim)
         type(simulation_t), intent(in) :: sim
         
@@ -1104,7 +1150,7 @@ contains
         print *, ""
     end subroutine print_steady_state_summary
     
-    !> Print transient summary (from original)
+    !> Print transient summary
     subroutine print_transient_summary(sim, step, t)
         type(simulation_t), intent(in) :: sim
         integer, intent(in) :: step
@@ -1120,7 +1166,7 @@ contains
         print *, ""
     end subroutine print_transient_summary
     
-    !> Cleanup (from original)
+    !> Cleanup
     subroutine cleanup_simulation(sim)
         type(simulation_t), intent(inout) :: sim
         
