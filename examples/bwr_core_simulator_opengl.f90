@@ -142,6 +142,11 @@ program bwr_core_simulator_opengl
             type(c_ptr), value :: font
             integer(c_int), value :: character
         end subroutine
+        subroutine glBlendFunc(sfactor, dfactor) bind(C, name='glBlendFunc')
+            import :: c_int
+            integer(c_int), value :: sfactor, dfactor
+        end subroutine
+        
         subroutine glColor4f(r, g, b, a) bind(C, name='glColor4f')
             import :: c_float
             real(c_float), value :: r, g, b, a
@@ -159,6 +164,9 @@ program bwr_core_simulator_opengl
     integer(c_int), parameter :: GL_MODELVIEW = int(z'1700', c_int)
     integer(c_int), parameter :: GL_QUADS = int(z'0007', c_int)
     integer(c_int), parameter :: GL_LINES = int(z'0001', c_int)
+    integer(c_int), parameter :: GL_BLEND = int(z'0BE2', c_int)
+    integer(c_int), parameter :: GL_SRC_ALPHA = int(z'0302', c_int)
+    integer(c_int), parameter :: GL_ONE_MINUS_SRC_ALPHA = int(z'0303', c_int)
     
     ! Simulation state (same as original)
     type :: simulation_t
@@ -382,7 +390,7 @@ contains
                     z = (real(k, wp) - real(g_sim%nz, wp) / 2.0_wp) * g_sim%dz
                     
                     ! Draw voxel
-                    call draw_cube(x, y, z, g_sim%dx * 0.4_wp * skip, r, g, b, 0.3_wp)
+                    call draw_cube(x, y, z, g_sim%dx * 0.4_wp * skip, r, g, b, 0.2_wp)
                 end do
             end do
         end do
@@ -757,7 +765,7 @@ contains
         sim%alpha_doppler = -2.5_wp
         sim%alpha_void = -50.0_wp
 
-        sim%rod_bank_position = 0.2_wp ! Start 20% inserted (typical for BWR startup)
+        sim%rod_bank_position = 1.0_wp ! Start 100% inserted
         
         print *, "Initializing physics modules..."
         
