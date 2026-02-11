@@ -142,6 +142,10 @@ program bwr_core_simulator_opengl
             type(c_ptr), value :: font
             integer(c_int), value :: character
         end subroutine
+        subroutine glColor4f(r, g, b, a) bind(C, name='glColor4f')
+            import :: c_float
+            real(c_float), value :: r, g, b, a
+        end subroutine
     end interface
     
     ! OpenGL constants
@@ -246,6 +250,7 @@ program bwr_core_simulator_opengl
     print *, "  +/-    - Increase/Decrease power"
     print *, "  r/R    - Insert positive/negative reactivity"
     print *, "  c/C    - Increase/Decrease coolant flow"
+    print *, "  i/o    - Inseart/Withdraw control rods"
     print *, "  w/s    - Rotate up/down"
     print *, "  a/d    - Rotate left/right"
     print *, "  z/x    - Zoom in/out"
@@ -290,7 +295,10 @@ contains
         call glutReshapeFunc(c_funloc(reshape_callback))
         call glutKeyboardFunc(c_funloc(keyboard_callback))
         call glutIdleFunc(c_funloc(idle_callback))
-        
+
+        call glEnable(GL_BLEND)
+        call glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            
         ! OpenGL settings
         call glClearColor(0.1_c_float, 0.1_c_float, 0.15_c_float, 1.0_c_float)
         call glEnable(GL_DEPTH_TEST)
@@ -374,7 +382,7 @@ contains
                     z = (real(k, wp) - real(g_sim%nz, wp) / 2.0_wp) * g_sim%dz
                     
                     ! Draw voxel
-                    call draw_cube(x, y, z, g_sim%dx * 0.4_wp * skip, r, g, b)
+                    call draw_cube(x, y, z, g_sim%dx * 0.4_wp * skip, r, g, b, 0.3_wp)
                 end do
             end do
         end do
@@ -514,8 +522,8 @@ contains
     end subroutine idle_callback
     
     !> Draw a coloured cube
-    subroutine draw_cube(x, y, z, size, r, g, b)
-        real(wp), intent(in) :: x, y, z, size, r, g, b
+    subroutine draw_cube(x, y, z, size, r, g, b, alpha)
+        real(wp), intent(in) :: x, y, z, size, r, g, b, alpha
         real(c_float) :: xf, yf, zf, sf
         
         xf = real(x, c_float)
@@ -523,7 +531,7 @@ contains
         zf = real(z, c_float)
         sf = real(size, c_float)
         
-        call glColor3f(real(r, c_float), real(g, c_float), real(b, c_float))
+        call glColor4f(real(r, c_float), real(g, c_float), real(b, c_float), real(alpha, c_float))
         call glBegin(GL_QUADS)
         
         ! Front
