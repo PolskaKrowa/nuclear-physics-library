@@ -219,7 +219,7 @@ program bwr_core_simulator_opengl
     ! Global state (must be SAVE for OpenGL callbacks)
     type(simulation_t), target, save :: g_sim
     type(viz_state_t), save :: g_viz
-    real(wp), save :: g_dt = 0.05_wp
+    real(wp), save :: g_dt = 0.01_wp
     logical, save :: g_converged = .false.
     integer(c_int), save :: g_window
     
@@ -488,12 +488,12 @@ contains
         
         ! [I]nsert Rods (Move Up)
         case (ichar('i'), ichar('I'))
-            g_sim%rod_bank_position = min(1.0_wp, g_sim%rod_bank_position + 0.02_wp)
+            g_sim%rod_bank_position = min(1.0_wp, g_sim%rod_bank_position + 0.005_wp)
             print *, "Rods Inserting: ", g_sim%rod_bank_position * 100.0, "%"
 
         ! [O]ut / Withdraw Rods (Move Down)
         case (ichar('o'), ichar('O'))
-            g_sim%rod_bank_position = max(0.0_wp, g_sim%rod_bank_position - 0.02_wp)
+            g_sim%rod_bank_position = max(0.0_wp, g_sim%rod_bank_position - 0.005_wp)
             print *, "Rods Withdrawing: ", g_sim%rod_bank_position * 100.0, "%"
             
         case(27, 113)  ! ESC or 'q'
@@ -510,6 +510,7 @@ contains
         if (.not. g_viz%paused .and. g_sim%initialized) then
             ! Run physics time step
             call coupled_time_step(g_sim, g_dt)
+            call apply_automatic_controls(g_sim, g_dt)
             
             g_viz%update_counter = g_viz%update_counter + 1
             
@@ -762,8 +763,8 @@ contains
         sim%inlet_temperature = 551.0_wp
         
         ! Feedback coefficients
-        sim%alpha_doppler = -2.5_wp
-        sim%alpha_void = -50.0_wp
+        sim%alpha_doppler = -3.5_wp
+        sim%alpha_void = -80.0_wp
 
         sim%rod_bank_position = 1.0_wp ! Start 100% inserted
         
@@ -872,6 +873,133 @@ contains
         print *, ""
     end subroutine setup_bwr_simulation
     
+    !> Automatic reactor protection system
+    !> Prevents power excursions and overtemperature conditions
+    !> Add this subroutine to the 'contains' section
+    subroutine apply_automatic_controls(sim, dt)
+        type(simulation_t), intent(inout) :: sim
+        real(wp), intent(in) :: dt
+        
+        real(wp) :: power_fraction, power_error, rod_adjustment
+        real(wp) :: temp_celsius, max_temp_celsius
+        real(wp) :: reactivity_pcm
+        logical, save :: warning_printed = .false.
+        
+        ! Temperature limits
+        real(wp), parameter :: SCRAM_TEMP = 1673.15_wp     ! 1400°C - automatic scram
+        real(wp), parameter :: HIGH_TEMP = 1473.15_wp      ! 1200°C - runback starts
+        real(wp), parameter :: NORMAL_TEMP = 1273.15_wp    ! 1000°C - normal max
+        
+        ! Power limits
+        real(wp), parameter :: SCRAM_POWER = 1.30_wp       ! 130% rated power
+        real(wp), parameter :: HIGH_POWER = 1.15_wp        ! 115% rated power
+        
+        real(wp) :: power_rate, max_rate
+
+        ! Get current state
+        power_fraction = sim%power_current / max(sim%power_rated, 1.0e6_wp)
+        max_temp_celsius = maxval(sim%heat%T) - 273.15_wp
+        reactivity_pcm = sim%reactivity_pcm
+        
+        ! ================================================================
+        ! EMERGENCY SCRAM CONDITIONS
+        ! ================================================================
+        
+        ! Temperature scram
+        if (sim%max_fuel_temp > SCRAM_TEMP) then
+            print *, ""
+            print *, "╔════════════════════════════════════════════╗"
+            print *, "║   *** EMERGENCY REACTOR SCRAM ***          ║"
+            print *, "║   CAUSE: FUEL TEMPERATURE LIMIT            ║"
+            print '(A,F7.1,A)', " ║   Temperature: ", max_temp_celsius, " °C                  ║"
+            print *, "║   Limit: 1400 °C                           ║"
+            print *, "║   ACTION: Full rod insertion               ║"
+            print *, "╚════════════════════════════════════════════╝"
+            print *, ""
+            sim%rod_bank_position = 1.0_wp
+            g_viz%paused = .true.
+            return
+        end if
+        
+        ! Power scram
+        if (power_fraction > SCRAM_POWER) then
+            print *, ""
+            print *, "╔════════════════════════════════════════════╗"
+            print *, "║   *** EMERGENCY REACTOR SCRAM ***          ║"
+            print *, "║   CAUSE: POWER EXCEEDED LIMIT              ║"
+            print '(A,F6.1,A)', " ║   Power: ", power_fraction * 100.0_wp, " %                        ║"
+            print *, "║   Limit: 130%                              ║"
+            print *, "║   ACTION: Full rod insertion               ║"
+            print *, "╚════════════════════════════════════════════╝"
+            print *, ""
+            sim%rod_bank_position = 1.0_wp
+            g_viz%paused = .true.
+            return
+        end if
+        
+        ! ================================================================
+        ! AUTOMATIC POWER RUNBACK
+        ! ================================================================
+        
+        ! High power condition - gradually insert rods
+        if (power_fraction > HIGH_POWER) then
+            rod_adjustment = (power_fraction - HIGH_POWER) * 0.02_wp * dt / 0.05_wp
+            sim%rod_bank_position = min(1.0_wp, sim%rod_bank_position + rod_adjustment)
+            
+            if (.not. warning_printed) then
+                print *, ""
+                print *, "⚠ AUTO CONTROL: Power high, inserting rods"
+                warning_printed = .true.
+            end if
+        else if (power_fraction < HIGH_POWER - 0.02_wp) then
+            warning_printed = .false.
+        end if
+        
+        ! High temperature condition - more aggressive rod insertion
+        if (sim%max_fuel_temp > HIGH_TEMP) then
+            rod_adjustment = (sim%max_fuel_temp - HIGH_TEMP) / 500.0_wp * 0.05_wp * dt / 0.05_wp
+            sim%rod_bank_position = min(1.0_wp, sim%rod_bank_position + rod_adjustment)
+            
+            if (mod(int(sim%time * 10), 50) == 0) then  ! Print every 5 seconds
+                print '(A,F7.1,A)', " ⚠ AUTO: High temp (", max_temp_celsius, &
+                    " °C), inserting rods"
+            end if
+        end if
+        
+        ! ================================================================
+        ! REACTIVITY LIMITING
+        ! ================================================================
+        
+        ! If reactivity is too positive, insert rods
+        if (reactivity_pcm > 500.0_wp) then
+            rod_adjustment = (reactivity_pcm - 500.0_wp) / 10000.0_wp * dt / 0.05_wp
+            sim%rod_bank_position = min(1.0_wp, sim%rod_bank_position + rod_adjustment)
+            
+            if (mod(int(sim%time * 10), 50) == 0) then
+                print '(A,F7.1,A)', " ⚠ AUTO: High reactivity (", reactivity_pcm, &
+                    " pcm), limiting"
+            end if
+        end if
+        
+        ! ================================================================
+        ! POWER RATE LIMITING
+        ! ================================================================
+        
+        ! Limit rate of power increase (prevent prompt critical excursions)
+        if (sim%n_steps > 1) then
+            
+            ! Maximum allowed power increase rate: 10% per second
+            max_rate = 0.10_wp * sim%power_rated * dt
+            power_rate = (sim%power_current - sim%neutronics%total_power) / dt
+            
+            if (power_rate > max_rate) then
+                rod_adjustment = 0.001_wp * dt / 0.05_wp
+                sim%rod_bank_position = min(1.0_wp, sim%rod_bank_position + rod_adjustment)
+            end if
+        end if
+        
+    end subroutine apply_automatic_controls
+
     subroutine coupled_time_step(sim, dt)
         type(simulation_t), intent(inout) :: sim
         real(wp), intent(in) :: dt

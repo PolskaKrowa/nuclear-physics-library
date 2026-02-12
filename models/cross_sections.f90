@@ -385,8 +385,8 @@ contains
         
         ! Macroscopic worth constants [cm^-1]
         ! These are "black" absorbers relative to fuel
-        delta_sigma_a_fast    = 0.015_wp   ! Small effect in fast group
-        delta_sigma_a_thermal = 0.150_wp   ! Massive effect in thermal group
+        delta_sigma_a_fast    = 0.08_wp   ! Small effect in fast group
+        delta_sigma_a_thermal = 8.0_wp   ! Massive effect in thermal group
 
         ! Linearly weight by how much rod is in this specific node
         if (rod_fraction > 0.0_wp) then
