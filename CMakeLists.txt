@@ -99,18 +99,6 @@ target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_phy
 # C Interface library
 add_subdirectory(interface)
 
-# BWR Core Simulator (console version)
-add_executable(bwr_core_simulator examples/bwr_core_simulator.f90)
-target_link_libraries(bwr_core_simulator 
-    nuclear_physics_models 
-    nuclear_physics_kernels 
-    nuclear_physics_core
-    ${LAPACK_LIBRARIES} 
-    ${BLAS_LIBRARIES})
-target_include_directories(bwr_core_simulator PRIVATE include)
-
-install(TARGETS bwr_core_simulator RUNTIME DESTINATION bin)
-
 # BWR Core Simulator with OpenGL (if available)
 if(OPENGL_AVAILABLE)
     add_executable(bwr_core_simulator_opengl examples/bwr_core_simulator_opengl.f90)
@@ -178,7 +166,6 @@ message(STATUS "    - nuclear_physics_models")
 message(STATUS "    - nuclear_physics_c (C interface)")
 message(STATUS "")
 message(STATUS "  Examples:")
-message(STATUS "    - bwr_core_simulator (console mode)")
 if(OPENGL_AVAILABLE)
     message(STATUS "    - bwr_core_simulator_opengl (3D visualisation)")
 else()

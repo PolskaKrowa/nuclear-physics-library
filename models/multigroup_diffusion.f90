@@ -614,6 +614,7 @@ contains
         
         deallocate(flux_prev)
         
+        call normalize_flux(state)
         call compute_power_distribution(state)
         k_eff = state%k_eff
         converged = state%converged
