@@ -186,23 +186,23 @@ contains
     !> Get cross sections with feedback applied
     subroutine xslib_get_xsec(library, material_name, T_fuel, rho_mod, burnup, &
                               xsec, Xe_conc, Sm_conc, boron_ppm)
-        type(xsec_library_t), intent(in) :: library
+        type(xsec_library_t), intent(in), target :: library
         character(len=*), intent(in) :: material_name
         real(wp), intent(in) :: T_fuel
         real(wp), intent(in) :: rho_mod
         real(wp), intent(in) :: burnup
-        type(mg_xsec_t), intent(out) :: xsec
+        type(mg_xsec_t), intent(inout) :: xsec
         real(wp), intent(in), optional :: Xe_conc, Sm_conc, boron_ppm
-        
-        type(xsec_material_t) :: mat
+
+        type(xsec_material_t), pointer :: mat
         integer :: i
         logical :: found
-        
-        ! Find material
+
+        ! Find material — pointer association avoids deep-copying allocatable components
         found = .false.
         do i = 1, library%n_materials
             if (trim(library%materials(i)%name) == trim(material_name)) then
-                mat = library%materials(i)
+                mat => library%materials(i)
                 found = .true.
                 exit
             end if

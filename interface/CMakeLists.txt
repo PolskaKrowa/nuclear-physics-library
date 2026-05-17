@@ -3,9 +3,10 @@
 # Builds the C/C++ interface layer for the nuclear physics library
 #
 
-# Create the C interface shared library
+# Create the C interface shared library (simple + full BWR)
 add_library(nuclear_physics_c SHARED
     c_interface.f90
+    bwr_c_interface.f90
 )
 
 # Set Fortran module output directory to match main project
@@ -31,8 +32,9 @@ install(TARGETS nuclear_physics_c
     ARCHIVE DESTINATION lib
 )
 
-# Install the C header file
-install(FILES 
+# Install the C header files
+install(FILES
     ${PROJECT_SOURCE_DIR}/include/nuclear_physics.h
+    ${PROJECT_SOURCE_DIR}/include/nuclear_physics_bwr.h
     DESTINATION include
 )
