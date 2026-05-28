@@ -43,6 +43,7 @@ module multigroup_diffusion
     public :: mg_get_flux, mg_get_power, mg_get_fission_rate
     public :: mg_compute_keff, mg_compute_form_factors
     public :: mg_validate_cross_sections
+    public :: normalize_flux_to_unity
     
     ! Standard energy group structures (eV boundaries)
     integer, parameter, public :: MG_2GROUP = 2
@@ -82,7 +83,12 @@ module multigroup_diffusion
         integer :: max_outer_iter = 100
         integer :: max_inner_iter = 50
         real(wp) :: outer_tolerance = 1.0e-5_wp
-        real(wp) :: inner_tolerance = 1.0e-6_wp
+        ! Inner-iteration relative flux tolerance. 1e-4 is tight enough for
+        ! transient physics fidelity (XS feedback steps are O(1 %) per tick)
+        ! but loose enough that the iterative solver converges within
+        ! max_inner_iter at quasi-steady states — 1e-6 was so tight that
+        ! discretisation noise alone kept the residual above it.
+        real(wp) :: inner_tolerance = 1.0e-4_wp
         real(wp) :: k_guess = 1.0_wp
         logical :: use_upscatter = .true.
         logical :: normalize_power = .true.
@@ -527,7 +533,7 @@ contains
         
         ! Chebyshev acceleration parameters
         real(wp), parameter :: rho_estimate = 0.95_wp  ! Spectral radius estimate
-        integer, parameter :: accel_start = 5  ! Start acceleration after N iterations
+        integer, parameter :: accel_start = 100000  ! Disabled: Chebyshev overshoots when k_inf>>1 and hits the upper clamp, causing false convergence at keff=5
         
         debug_mode = .false.
         if (present(verbose)) debug_mode = verbose
@@ -541,7 +547,10 @@ contains
         end if
         
         allocate(flux_prev(state%nx, state%ny, state%nz, state%n_groups))
-        
+
+        ! Reset keff if it is stuck at a clamp boundary from a previous solve.
+        if (state%k_eff >= 4.99_wp .or. state%k_eff <= 0.006_wp) state%k_eff = 1.0_wp
+
         state%converged = .false.
         where (state%flux < 1.0e-10_wp) state%flux = 1.0_wp
         
@@ -599,8 +608,8 @@ contains
                 state%k_eff = state%k_eff_old * (fission_new / fission_sum)
             end if
             
-            ! Clamp k-eff
-            state%k_eff = min(max(state%k_eff, 0.1_wp), 5.0_wp)
+            ! Clamp k-eff (lower bound allows convergence to deep subcriticality)
+            state%k_eff = min(max(state%k_eff, 0.005_wp), 5.0_wp)
             
             ! Check convergence
             k_error = abs(state%k_eff - state%k_eff_old) / (abs(state%k_eff) + 1.0e-30_wp)
@@ -712,7 +721,7 @@ contains
         real(wp), parameter :: ONE_MINUS_RELAX = 0.2_wp
         
         ! Pre-compute k_eff inverse to avoid division in inner loop
-        k_eff_inv = 1.0_wp / max(state%k_eff, 0.1_wp)
+        k_eff_inv = 1.0_wp / max(state%k_eff, 0.005_wp)
         
         ! Cache-friendly loop order: k, j, i (matches memory layout)
         !$OMP PARALLEL DO PRIVATE(i, j, D, sigma_r, phi_xm, phi_xp, phi_ym, phi_yp, &
@@ -926,11 +935,18 @@ contains
     !> Normalize flux to specified power level
     subroutine normalize_flux(state)
         type(mg_state_t), intent(inout) :: state
-        
+
         real(wp) :: current_power, scale_factor
         integer :: i, j, k, g
-        
+
         if (.not. state%config%normalize_power) return
+
+        ! Flux amplitude is only meaningful at near-critical conditions.
+        ! Scaling a deeply subcritical flux to rated power produces an
+        ! astronomically large scale_factor; multiplied into the flux
+        ! this pushes values to Infinity, which -ffast-math turns into
+        ! NaN in subsequent arithmetic, causing OMP worker crashes.
+        if (state%k_eff < 0.95_wp) return
         
         ! Compute current power
         current_power = 0.0_wp
@@ -1086,13 +1102,16 @@ contains
         end if
     end subroutine mg_get_flux
     
-    !> Get power density
+    !> Get power density. Returns the stored field in its native units of
+    !> W/cm³ — matches the docstring at the top of this module. Callers
+    !> that need W/m³ should use `fuel_power_to_volumetric_W_m3`. The
+    !> previous behaviour silently multiplied by 10⁶, which combined with
+    !> the helper's own 10⁶ multiplier produced a 10¹² over-conversion
+    !> and a 1.4 MW/m³ phantom heat source at cold standby.
     subroutine mg_get_power(state, power)
         type(mg_state_t), intent(in) :: state
         real(wp), intent(out) :: power(:, :, :)
-        
-        ! Convert W/cm³ to W/m³
-        power = state%power_density * 1.0e6_wp
+        power = state%power_density
     end subroutine mg_get_power
     
     !> Get fission rate
@@ -1103,17 +1122,31 @@ contains
         fission_rate = state%fission_source
     end subroutine mg_get_fission_rate
     
-    !> Compute k-effective from flux distribution
+    !> Compute k-effective from flux distribution, including leakage.
+    !!
+    !! k = (production) / (absorption + leakage)
+    !!
+    !! where leakage = -∑ D · ∇²φ integrated over interior cells. Previously
+    !! this returned production/absorption only, which is the k_inf-like
+    !! ratio: when flux concentrates in an unshielded sub-region (e.g. the
+    !! top axial node with bottom-entry rods at 95 % insertion) the ratio
+    !! reads as the *local* k of that sub-region and ignores leakage to
+    !! the surrounding shielded volume. The power gate downstream of this
+    !! reads sim%k_eff < 0.98 to gate power to zero; without the leakage
+    !! term, a deeply rod-blocked cold core can spuriously read k > 1 and
+    !! let fission power leak through.
     function mg_compute_keff(state) result(k_eff)
         type(mg_state_t), intent(in) :: state
         real(wp) :: k_eff
-        
-        real(wp) :: production, absorption
+
+        real(wp) :: production, absorption, leakage
+        real(wp) :: lap, phi_c, D
         integer :: i, j, k, g
-        
+
         production = 0.0_wp
         absorption = 0.0_wp
-        
+        leakage    = 0.0_wp
+
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
@@ -1122,13 +1155,32 @@ contains
                             state%xsec(i, j, k)%nu_sigma_f(g) * state%flux(i, j, k, g)
                         absorption = absorption + &
                             state%xsec(i, j, k)%sigma_a(g) * state%flux(i, j, k, g)
+
+                        ! Net leakage: -D · ∇²φ summed over interior cells
+                        ! gives the surface integral of -D∇φ (divergence
+                        ! theorem). Boundary cells are skipped — their
+                        ! contribution is captured by the BC applied to
+                        ! the adjacent interior cell's neighbour value.
+                        if (i > 1 .and. i < state%nx .and. &
+                            j > 1 .and. j < state%ny .and. &
+                            k > 1 .and. k < state%nz) then
+                            phi_c = state%flux(i, j, k, g)
+                            D     = state%xsec(i, j, k)%D(g)
+                            lap = (state%flux(i+1, j, k, g) - 2.0_wp * phi_c &
+                                 + state%flux(i-1, j, k, g)) * state%inv_dx2 &
+                                + (state%flux(i, j+1, k, g) - 2.0_wp * phi_c &
+                                 + state%flux(i, j-1, k, g)) * state%inv_dy2 &
+                                + (state%flux(i, j, k+1, g) - 2.0_wp * phi_c &
+                                 + state%flux(i, j, k-1, g)) * state%inv_dz2
+                            leakage = leakage - D * lap
+                        end if
                     end do
                 end do
             end do
         end do
-        
-        if (absorption > TOL_DEFAULT) then
-            k_eff = production / absorption
+
+        if (absorption + leakage > TOL_DEFAULT) then
+            k_eff = production / (absorption + leakage)
         else
             k_eff = 0.0_wp
         end if
@@ -1170,6 +1222,10 @@ contains
         real(wp) :: phi_xp, phi_xm
         real(wp) :: phi_yp, phi_ym
         real(wp) :: phi_zp, phi_zm
+        real(wp) :: phi_xp_old, phi_xm_old
+        real(wp) :: phi_yp_old, phi_ym_old
+        real(wp) :: phi_zp_old, phi_zm_old
+        real(wp) :: stencil_new, stencil_old
         real(wp) :: phi_new
         real(wp) :: phi_old
         real(wp) :: coef_x, coef_y, coef_z
@@ -1187,8 +1243,17 @@ contains
         real(wp), parameter :: beta(6) = [0.000215_wp, 0.001424_wp, 0.001274_wp, &
                                         0.002568_wp, 0.000748_wp, 0.000273_wp]
         
-        ! Time discretization: θ = 0.5 for Crank-Nicolson (unconditionally stable)
-        theta = 0.5_wp
+        ! Time discretization: backward Euler (θ = 1.0). CN (θ = 0.5) is
+        ! L2-stable but oscillates for stiff systems where |λ|·dt >> 1.
+        ! Neutron diffusion is *extremely* stiff: the prompt-decay rate is
+        ! 1/(σ_a·v) ~ 1 µs, while dt is 20 ms — that's ~30000 mean-free
+        ! times per tick. CN's amplification factor (1+(1-θ)·γ·dt)/(1-θ·γ·dt)
+        ! tends to -1 in this regime → flux flips sign each tick (visible
+        ! as a 2-tick k_eff limit cycle ~0.0015 ↔ ~0.045 at cold standby).
+        ! Backward Euler is unconditionally monotone and damps the prompt
+        ! transient instantly, which is the physically correct behaviour
+        ! at this dt (we resolve delayed timescales, not prompt).
+        theta = 1.0_wp
         
         ! Store old flux
         state%flux_old = state%flux
@@ -1202,11 +1267,13 @@ contains
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
-                    ! Compute local fission rate
+                    ! Delayed-neutron production rate: beta_d * nu * Sigma_f * phi.
+                    ! Use nu_sigma_f (not sigma_f) so lambda_d * C_d evaluates as the
+                    ! delayed *neutron* source rate, not the delayed *fission* rate.
                     fission_total = 0.0_wp
                     do g = 1, state%n_groups
                         fission_total = fission_total + &
-                            state%xsec(i,j,k)%sigma_f(g) * state%flux_old(i,j,k,g)
+                            state%xsec(i,j,k)%nu_sigma_f(g) * state%flux_old(i,j,k,g)
                     end do
                     
                     ! Update each delayed group
@@ -1256,14 +1323,23 @@ contains
                             ! Time derivative coefficient
                             coef_time = v_inv_val / dt
                             
-                            ! Get neighbor fluxes
+                            ! Neighbor fluxes at current iterate (n+1) and old step (n).
+                            ! Crank-Nicolson needs both: theta-weighted on the new side,
+                            ! (1-theta) weighted on the old side.
                             phi_xm = max(state%flux(i-1,j,k,g), 0.0_wp)
                             phi_xp = max(state%flux(i+1,j,k,g), 0.0_wp)
                             phi_ym = max(state%flux(i,j-1,k,g), 0.0_wp)
                             phi_yp = max(state%flux(i,j+1,k,g), 0.0_wp)
                             phi_zm = max(state%flux(i,j,k-1,g), 0.0_wp)
                             phi_zp = max(state%flux(i,j,k+1,g), 0.0_wp)
-                            
+
+                            phi_xm_old = max(state%flux_old(i-1,j,k,g), 0.0_wp)
+                            phi_xp_old = max(state%flux_old(i+1,j,k,g), 0.0_wp)
+                            phi_ym_old = max(state%flux_old(i,j-1,k,g), 0.0_wp)
+                            phi_yp_old = max(state%flux_old(i,j+1,k,g), 0.0_wp)
+                            phi_zm_old = max(state%flux_old(i,j,k-1,g), 0.0_wp)
+                            phi_zp_old = max(state%flux_old(i,j,k+1,g), 0.0_wp)
+
                             ! Diffusion operator coefficients
                             coef_x = D_coef * inv_dx2
                             coef_y = D_coef * inv_dy2
@@ -1314,17 +1390,31 @@ contains
                             source = inscatter + fission_prompt + fission_delayed + &
                                     state%external_source(i,j,k,g)
                             
-                            ! Assemble equation: [coef_time + theta*(coef_c + sigma_r)]*phi = RHS
-                            ! Right-hand side
+                            ! Crank-Nicolson assembly. Move theta-weighted (n+1) terms
+                            ! to the LHS, (1-theta) (n) terms to the RHS:
+                            !   [coef_time + theta*(coef_c + sigma_r)] * phi^{n+1}
+                            !     = coef_time*phi^n
+                            !       + theta * neighbor_new
+                            !       + (1-theta) * [neighbor_old - (coef_c + sigma_r)*phi^n]
+                            !       + source
+                            ! Previously both stencils used the new iterate and the
+                            ! (1-theta) center removal was missing, collapsing the
+                            ! scheme to an inconsistent mix of CN diagonal and BE
+                            ! off-diagonal -- effectively over-implicit on the
+                            ! neighbours, biasing steady state.
+                            stencil_new = coef_x * (phi_xm     + phi_xp)     + &
+                                          coef_y * (phi_ym     + phi_yp)     + &
+                                          coef_z * (phi_zm     + phi_zp)
+                            stencil_old = coef_x * (phi_xm_old + phi_xp_old) + &
+                                          coef_y * (phi_ym_old + phi_yp_old) + &
+                                          coef_z * (phi_zm_old + phi_zp_old)
+
                             rhs = coef_time * phi_old + &
-                                (1.0_wp - theta) * (coef_x * (phi_xm + phi_xp) + &
-                                                    coef_y * (phi_ym + phi_yp) + &
-                                                    coef_z * (phi_zm + phi_zp)) + &
-                                theta * (coef_x * (phi_xm + phi_xp) + &
-                                        coef_y * (phi_ym + phi_yp) + &
-                                        coef_z * (phi_zm + phi_zp)) + &
-                                source
-                            
+                                  theta * stencil_new + &
+                                  (1.0_wp - theta) * &
+                                    (stencil_old - (coef_c + sigma_r_val) * phi_old) + &
+                                  source
+
                             ! Left-hand side denominator
                             denom = coef_time + theta * (coef_c + sigma_r_val)
                             denom = max(denom, MIN_DENOM)
@@ -1339,10 +1429,14 @@ contains
                             phi_new = max(phi_new, 0.0_wp)
                             phi_new = min(phi_new, MAX_FLUX)
                             
-                            ! Track maximum change
+                            ! Track maximum absolute change. We normalise after
+                            ! the full sweep against the max flux across the
+                            ! domain — per-cell normalisation by (phi_new + tiny)
+                            ! blows up for near-zero cells (cold standby with
+                            ! rods deep in) and produces false non-convergence.
                             flux_change = abs(phi_new - state%flux(i,j,k,g))
-                            max_change = max(max_change, flux_change / (phi_new + 1.0e-10_wp))
-                            
+                            max_change  = max(max_change, flux_change)
+
                             state%flux(i,j,k,g) = phi_new
                         end do
                     end do
@@ -1352,15 +1446,27 @@ contains
                 call apply_boundary_conditions(state, g)
             end do
             
-            ! Check for convergence
-            if (max_change < state%config%inner_tolerance) then
+            ! Normalise: convergence is satisfied when the largest per-cell
+            ! flux change is below tolerance × max flux in the domain. This
+            ! is invariant to flux amplitude — works equally well for
+            ! cold-standby (max φ ~ 10^3 n/cm²/s) and rated (max φ ~ 10^14).
+            if (max_change < state%config%inner_tolerance * &
+                              max(maxval(state%flux), 1.0_wp)) then
                 state%inner_iterations = iter
                 exit
             end if
-            
-            if (iter == state%config%max_inner_iter) then
-                print '(A,I4,A,ES10.3)', 'WARNING: Transient solver did not converge in ', &
-                    iter, ' iterations. Max change: ', max_change
+
+            ! Only warn on hard divergence (max change > 10 % of peak flux
+            ! after burning the full inner-iter budget). Smaller residuals
+            ! are normal during active transients (rod motion, XS feedback)
+            ! and converge in subsequent ticks — the warning would otherwise
+            ! spam the log every step of any non-trivial transient.
+            if (iter == state%config%max_inner_iter .and. &
+                max_change > 0.1_wp * max(maxval(state%flux), 1.0_wp)) then
+                print '(A,I4,A,ES10.3,A,ES10.3)', &
+                    'WARNING: Transient solver diverging at iter ', &
+                    iter, '. Max change: ', max_change, &
+                    '  max flux: ', maxval(state%flux)
             end if
         end do
         

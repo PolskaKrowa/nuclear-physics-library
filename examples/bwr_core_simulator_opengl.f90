@@ -10,8 +10,6 @@ program bwr_core_simulator_opengl
     use burnup_depletion
     use heat_transfer
     use two_phase_flow
-    use fluid_dynamics
-    use pressure_dynamics
     use rng, only: rng_seed
 
     implicit none
@@ -770,9 +768,10 @@ contains
         ! ── Physics initialisations ──────────────────
         ! Saturation temperature at nominal pressure (sat_temp_K at 7.14 MPa ≈ 286°C = 559 K)
         sim%sat_temperature  = sat_temp_K(sim%pressure_operating)
-        ! Water level: Lbase is effective water inventory; initialise to core_height + 1.5 m
-        sim%Lbase            = sim%core_height + 1.5_wp   ! m
-        sim%Lrx              = 1.5_wp                     ! m above core top
+        ! Water level: normal BWR setpoint ≈ 0.5 m above top of active fuel.
+        sim%Lbase            = (0.5_wp + sim%core_height) &
+                             * (coolant_density_gl(sim%inlet_temperature) / 1000.0_wp)
+        sim%Lrx              = calc_reactor_level(sim%Lbase, sim%inlet_temperature, sim%core_height)
         sim%avg_coolant_temp = sim%inlet_temperature
         sim%coolant_T_prev1  = sim%inlet_temperature
         sim%coolant_T_prev2  = sim%inlet_temperature

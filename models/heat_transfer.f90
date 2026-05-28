@@ -1,4 +1,4 @@
-! physics/heat_transfer.f90
+! models/heat_transfer.f90
 !
 ! Heat transfer model for nuclear reactor simulation.
 ! Solves the heat equation with convection and source terms:
@@ -27,6 +27,7 @@ module heat_transfer
     use constants, only: TOL_DEFAULT
     use finite_difference, only: fd_laplacian_2d, fd_laplacian_3d, fd_derivative_2d
     use finite_volume, only: fv_diffusion_2d, fv_advection_diffusion_1d
+    use solve_linear, only: solve_tridiagonal, SOLVE_SUCCESS
     implicit none
     private
     
@@ -34,7 +35,7 @@ module heat_transfer
     public :: heat_config_t, heat_state_t, heat_material_t
     public :: heat_init, heat_destroy
     public :: heat_set_properties, heat_set_source, heat_set_velocity
-    public :: heat_set_bc, heat_apply_bc
+    public :: heat_set_bc, heat_apply_bc, heat_set_coolant
     public :: heat_step, heat_step_implicit
     public :: heat_get_max_dt
     
@@ -85,7 +86,17 @@ module heat_transfer
         real(wp), allocatable :: vx(:, :, :)
         real(wp), allocatable :: vy(:, :, :)
         real(wp), allocatable :: vz(:, :, :)
-        
+
+        ! Per-cell coolant coupling (reorg step 11). When allocated,
+        ! heat_step / heat_step_implicit use these instead of the legacy
+        ! T_FLUID = 558 K, H_CONV = 30000 W/m²·K constants. They are
+        ! populated by the orchestrator from two_phase_state_t via
+        ! fuel_compute_convection_coefficients so that the convective
+        ! sink reflects local flow regime (single-phase forced convection
+        ! vs nucleate boiling vs DNB).
+        real(wp), allocatable :: T_fluid(:, :, :)   ! [K]
+        real(wp), allocatable :: h_conv(:, :, :)    ! [W/m²·K]
+
         ! Configuration
         type(heat_config_t) :: config
         
@@ -155,6 +166,8 @@ contains
         if (allocated(state%vx)) deallocate(state%vx)
         if (allocated(state%vy)) deallocate(state%vy)
         if (allocated(state%vz)) deallocate(state%vz)
+        if (allocated(state%T_fluid)) deallocate(state%T_fluid)
+        if (allocated(state%h_conv)) deallocate(state%h_conv)
     end subroutine heat_destroy
     
     !> Set material properties for a region
@@ -222,6 +235,28 @@ contains
         if (present(vz)) state%vz = vz
     end subroutine heat_set_velocity
     
+    !> Set per-cell coolant temperature and convective coefficient.
+    !!
+    !! Lazy-allocates state%T_fluid and state%h_conv on first call. Both
+    !! arrays must match the kernel grid shape. When these are allocated,
+    !! heat_step / heat_step_implicit use per-cell values; otherwise they
+    !! fall back to the legacy T_FLUID = 558 K, H_CONV = 30000 W/m²·K
+    !! constants. See fuel_compute_convection_coefficients (subsystems/
+    !! fuel.f90) for the regime-aware producer.
+    subroutine heat_set_coolant(state, T_fluid, h_conv)
+        type(heat_state_t), intent(inout) :: state
+        real(wp), intent(in) :: T_fluid(:, :, :)
+        real(wp), intent(in) :: h_conv(:, :, :)
+
+        if (.not. allocated(state%T_fluid)) &
+            allocate(state%T_fluid(state%nx, state%ny, state%nz))
+        if (.not. allocated(state%h_conv)) &
+            allocate(state%h_conv(state%nx, state%ny, state%nz))
+
+        state%T_fluid = T_fluid
+        state%h_conv  = h_conv
+    end subroutine heat_set_coolant
+
     !> Set boundary condition
     subroutine heat_set_bc(state, face, bc_type, value, htc, t_ambient)
         type(heat_state_t), intent(inout) :: state
@@ -245,36 +280,41 @@ contains
         real(wp), allocatable :: dT_dx(:, :, :), dT_dy(:, :, :), dT_dz(:, :, :)
         integer :: i, j, k
         real(wp) :: alpha, rho_cp, diffusion, convection, source
-        real(wp) :: h_conv, T_fluid, q_conv  ! Convective cooling variables
-        real(wp) :: D_equiv, A_over_V        ! Geometry variables
-        
+        real(wp) :: h_conv_ij, T_fluid_ij, q_conv  ! per-cell convective cooling
+        real(wp) :: A_over_V                       ! Surface area / volume [1/m]
+
+        real(wp), parameter :: D_EQUIV     = 0.01_wp      ! [m]
+        real(wp), parameter :: H_CONV_DEF  = 30000.0_wp   ! [W/m²·K]
+        real(wp), parameter :: T_FLUID_DEF = 558.0_wp     ! BWR sat @ 7 MPa [K]
+        logical :: use_per_cell
+
         allocate(laplacian(state%nx, state%ny, state%nz))
-        
+
         state%T_old = state%T
-        
+
         ! Compute Laplacian (diffusion term)
         call fd_laplacian_3d(state%T, laplacian, state%dx, state%dy, state%dz)
-        
+
         ! Compute convection terms if needed
         if (state%config%include_convection) then
             allocate(dT_dx(state%nx, state%ny, state%nz))
             allocate(dT_dy(state%nx, state%ny, state%nz))
             allocate(dT_dz(state%nx, state%ny, state%nz))
-            
+
             call compute_gradient_3d(state%T, dT_dx, dT_dy, dT_dz, &
                                     state%dx, state%dy, state%dz)
         end if
-        
-        ! Geometry parameters for convective cooling
-        D_equiv = 0.01_wp      ! 10 mm equivalent diameter
-        A_over_V = 4.0_wp / D_equiv  ! Surface area to volume ratio [1/m]
-        
-        ! Heat transfer coefficient (typical BWR value)
-        h_conv = 30000.0_wp    ! W/m²·K
-        
-        ! Coolant temperature (approximation)
-        T_fluid = 558.0_wp     ! Saturation at 7 MPa
-        
+
+        ! Geometry parameters for convective cooling. A_over_V uses the
+        ! legacy 10 mm hydraulic diameter; the heated_perimeter that
+        ! drives the two-phase kernel is per-cell but the BWR fuel-bundle
+        ! A/V is comparable, so this is acceptable for the current step.
+        A_over_V = 4.0_wp / D_EQUIV
+
+        ! Step-11: pick per-cell coolant if the orchestrator wired it in,
+        ! else fall back to the legacy constants.
+        use_per_cell = allocated(state%T_fluid) .and. allocated(state%h_conv)
+
         ! Update temperature field
         do k = 1, state%nz
             do j = 1, state%ny
@@ -282,10 +322,10 @@ contains
                     alpha = state%material(i, j, k)%thermal_diffusivity
                     rho_cp = state%material(i, j, k)%density * &
                             state%material(i, j, k)%specific_heat
-                    
+
                     ! Diffusion
                     diffusion = alpha * laplacian(i, j, k)
-                    
+
                     ! Convection (fluid flow)
                     convection = 0.0_wp
                     if (state%config%include_convection) then
@@ -293,10 +333,18 @@ contains
                                     state%vy(i, j, k) * dT_dy(i, j, k) + &
                                     state%vz(i, j, k) * dT_dz(i, j, k))
                     end if
-                    
+
+                    if (use_per_cell) then
+                        h_conv_ij  = state%h_conv(i, j, k)
+                        T_fluid_ij = state%T_fluid(i, j, k)
+                    else
+                        h_conv_ij  = H_CONV_DEF
+                        T_fluid_ij = T_FLUID_DEF
+                    end if
+
                     ! Convective heat removal to coolant [W/m³]
-                    q_conv = h_conv * A_over_V * (state%T(i, j, k) - T_fluid)
-                    
+                    q_conv = h_conv_ij * A_over_V * (state%T(i, j, k) - T_fluid_ij)
+
                     ! Source term (includes heat generation minus cooling)
                     source = state%Q(i, j, k) / rho_cp - q_conv / rho_cp
                     
@@ -304,9 +352,12 @@ contains
                     state%T(i, j, k) = state%T(i, j, k) + dt * &
                         (diffusion + convection + source)
                     
-                    ! Prevent unphysical temperatures
-                    state%T(i, j, k) = max(state%T(i, j, k), 300.0_wp)  ! Min 300 K
-                    state%T(i, j, k) = min(state%T(i, j, k), 3000.0_wp) ! Max 3000 K
+                    ! Prevent unphysical temperatures. Floor at 273.15 K so
+                    ! cold standby (293 K coolant) is representable; the
+                    ! previous 300 K floor silently warmed the cold preset
+                    ! by ~7 K every tick.
+                    state%T(i, j, k) = max(state%T(i, j, k), 273.15_wp)
+                    state%T(i, j, k) = min(state%T(i, j, k), 3000.0_wp)
                 end do
             end do
         end do
@@ -323,14 +374,150 @@ contains
         if (allocated(dT_dx)) deallocate(dT_dx, dT_dy, dT_dz)
     end subroutine heat_step
     
-    !> Implicit time step (more stable for large dt)
+    !> Implicit time step (unconditionally stable for any dt).
+    !!
+    !! Backward-Euler diffusion + analytic implicit reaction, advection-free.
+    !! Diffusion is split into three 1-D ADI sweeps (Lie splitting), each
+    !! solved with a tridiagonal Thomas pass; the convective sink to T_fluid
+    !! is handled point-wise in closed form before the sweeps. Variable
+    !! material properties are accommodated via the harmonic mean of the
+    !! cell-centred diffusivities at each face.
+    !!
+    !! Intended for the steady-state relaxation loop and any future call
+    !! site that needs to take a large dt without CFL constraints. The
+    !! solver assumes velocities are zero (true during steady-state solve);
+    !! for transient runs with non-zero coolant flow, use heat_step.
     subroutine heat_step_implicit(state, dt)
         type(heat_state_t), intent(inout) :: state
         real(wp), intent(in) :: dt
-        
-        ! For now, fall back to explicit
-        ! In production, implement implicit solver using solve_linear module
-        call heat_step(state, dt)
+
+        real(wp), parameter :: T_FLUID_DEF = 558.0_wp   ! BWR saturation @ 7 MPa [K]
+        real(wp), parameter :: H_CONV_DEF  = 30000.0_wp ! [W/m²·K]
+        real(wp), parameter :: D_EQUIV     = 0.01_wp    ! [m]
+        real(wp), parameter :: A_over_V    = 4.0_wp / D_EQUIV
+        real(wp), parameter :: ALPHA_FLOOR = 1.0e-20_wp
+
+        real(wp), allocatable :: alpha(:,:,:)
+        real(wp), allocatable :: a_diag(:), b_diag(:), c_diag(:), rhs(:), sol(:)
+        real(wp) :: rho_cp, beta, alpha_face, coef
+        real(wp) :: h_conv_ij, T_fluid_ij
+        logical  :: use_per_cell
+        integer  :: i, j, k, n_max
+        integer(i32) :: status
+
+        if (.not. allocated(state%T)) return
+
+        n_max = max(state%nx, state%ny, state%nz)
+        allocate(alpha(state%nx, state%ny, state%nz))
+        allocate(a_diag(n_max - 1), b_diag(n_max), c_diag(n_max - 1))
+        allocate(rhs(n_max), sol(n_max))
+
+        alpha = state%material(:, :, :)%thermal_diffusivity
+        state%T_old = state%T
+
+        ! Step-11: pick per-cell coolant if the orchestrator wired it in.
+        use_per_cell = allocated(state%T_fluid) .and. allocated(state%h_conv)
+
+        ! ── Reaction + source: analytic implicit step on the point-wise ODE ─────
+        !   dT/dt = Q/(ρcp) - β·(T - T_fluid),  β = h_conv·A/V/(ρcp)
+        !   T* = (T + dt·(Q/(ρcp) + β·T_fluid)) / (1 + dt·β)
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx
+                    rho_cp = state%material(i,j,k)%density * &
+                             state%material(i,j,k)%specific_heat
+                    if (use_per_cell) then
+                        h_conv_ij  = state%h_conv(i, j, k)
+                        T_fluid_ij = state%T_fluid(i, j, k)
+                    else
+                        h_conv_ij  = H_CONV_DEF
+                        T_fluid_ij = T_FLUID_DEF
+                    end if
+                    beta = h_conv_ij * A_over_V / max(rho_cp, ALPHA_FLOOR)
+                    state%T(i,j,k) = (state%T(i,j,k) + &
+                        dt * (state%Q(i,j,k) / max(rho_cp, ALPHA_FLOOR) + beta * T_fluid_ij)) &
+                        / (1.0_wp + dt * beta)
+                end do
+            end do
+        end do
+
+        ! ── ADI sweep 1: x-direction implicit diffusion ────────────────────────
+        do k = 1, state%nz
+            do j = 1, state%ny
+                do i = 1, state%nx - 1
+                    alpha_face = 2.0_wp * alpha(i,j,k) * alpha(i+1,j,k) / &
+                                 max(alpha(i,j,k) + alpha(i+1,j,k), ALPHA_FLOOR)
+                    coef = -dt * alpha_face / (state%dx * state%dx)
+                    a_diag(i) = coef
+                    c_diag(i) = coef
+                end do
+                b_diag(1) = 1.0_wp - c_diag(1)
+                do i = 2, state%nx - 1
+                    b_diag(i) = 1.0_wp - a_diag(i-1) - c_diag(i)
+                end do
+                b_diag(state%nx) = 1.0_wp - a_diag(state%nx - 1)
+                rhs(1:state%nx) = state%T(1:state%nx, j, k)
+                call solve_tridiagonal(a_diag(1:state%nx-1), b_diag(1:state%nx), &
+                                       c_diag(1:state%nx-1), rhs(1:state%nx), &
+                                       sol(1:state%nx), status)
+                if (status == SOLVE_SUCCESS) state%T(:, j, k) = sol(1:state%nx)
+            end do
+        end do
+
+        ! ── ADI sweep 2: y-direction implicit diffusion ────────────────────────
+        do k = 1, state%nz
+            do i = 1, state%nx
+                do j = 1, state%ny - 1
+                    alpha_face = 2.0_wp * alpha(i,j,k) * alpha(i,j+1,k) / &
+                                 max(alpha(i,j,k) + alpha(i,j+1,k), ALPHA_FLOOR)
+                    coef = -dt * alpha_face / (state%dy * state%dy)
+                    a_diag(j) = coef
+                    c_diag(j) = coef
+                end do
+                b_diag(1) = 1.0_wp - c_diag(1)
+                do j = 2, state%ny - 1
+                    b_diag(j) = 1.0_wp - a_diag(j-1) - c_diag(j)
+                end do
+                b_diag(state%ny) = 1.0_wp - a_diag(state%ny - 1)
+                rhs(1:state%ny) = state%T(i, 1:state%ny, k)
+                call solve_tridiagonal(a_diag(1:state%ny-1), b_diag(1:state%ny), &
+                                       c_diag(1:state%ny-1), rhs(1:state%ny), &
+                                       sol(1:state%ny), status)
+                if (status == SOLVE_SUCCESS) state%T(i, :, k) = sol(1:state%ny)
+            end do
+        end do
+
+        ! ── ADI sweep 3: z-direction implicit diffusion ────────────────────────
+        do j = 1, state%ny
+            do i = 1, state%nx
+                do k = 1, state%nz - 1
+                    alpha_face = 2.0_wp * alpha(i,j,k) * alpha(i,j,k+1) / &
+                                 max(alpha(i,j,k) + alpha(i,j,k+1), ALPHA_FLOOR)
+                    coef = -dt * alpha_face / (state%dz * state%dz)
+                    a_diag(k) = coef
+                    c_diag(k) = coef
+                end do
+                b_diag(1) = 1.0_wp - c_diag(1)
+                do k = 2, state%nz - 1
+                    b_diag(k) = 1.0_wp - a_diag(k-1) - c_diag(k)
+                end do
+                b_diag(state%nz) = 1.0_wp - a_diag(state%nz - 1)
+                rhs(1:state%nz) = state%T(i, j, 1:state%nz)
+                call solve_tridiagonal(a_diag(1:state%nz-1), b_diag(1:state%nz), &
+                                       c_diag(1:state%nz-1), rhs(1:state%nz), &
+                                       sol(1:state%nz), status)
+                if (status == SOLVE_SUCCESS) state%T(i, j, :) = sol(1:state%nz)
+            end do
+        end do
+
+        call heat_apply_bc(state)
+        state%T = max(state%T, 273.15_wp)
+        state%T = min(state%T, 3000.0_wp)
+
+        state%time  = state%time + dt
+        state%steps = state%steps + 1
+
+        deallocate(alpha, a_diag, b_diag, c_diag, rhs, sol)
     end subroutine heat_step_implicit
     
     !> Apply boundary conditions

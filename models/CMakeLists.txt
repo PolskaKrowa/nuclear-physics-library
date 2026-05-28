@@ -1,8 +1,5 @@
 set(MODEL_SOURCES
-    fluid_dynamics.f90
     heat_transfer.f90
-    nuclear_fission.f90
-    pressure_dynamics.f90
     two_phase_flow.f90
     multigroup_diffusion.f90
     cross_sections.f90

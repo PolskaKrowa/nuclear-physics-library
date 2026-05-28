@@ -74,10 +74,11 @@ Nuclear Physics Library is a comprehensive Fortran toolkit providing utilities, 
 
 | Model | Capabilities |
 |-------|-------------|
-| **Fluid Dynamics** | Incompressible Navier-Stokes, projection method, natural convection, multi-region support |
-| **Heat Transfer** | Diffusion-convection with sources, multi-material regions, coupled flow |
-| **Nuclear Fission** | Point kinetics, multi-group diffusion, decay heat (ANS-5.1), 6-group precursors |
-| **Pressure Dynamics** | Multiple EOS, acoustic waves, phase transitions, compressibility |
+| **Burnup Depletion** | Fuel burnup and isotopic depletion tracking |
+| **Cross Sections** | Cross-section library with temperature and density feedback |
+| **Heat Transfer** | Heat transfer between fuel and coolant |
+| **Multigroup Diffsion** | Multi-group neutron diffusion solver |
+| **Two-Phase Flow** | Two-Phase drift-flux model |
 
 </details>
 
@@ -206,10 +207,7 @@ nuclear-physics-library/
     ├── cross_sections.f90
     ├── multigroup_diffusion.f90
     ├── two_phase_flow.f90
-    ├── fluid_dynamics.f90
-    ├── heat_transfer.f90
-    ├── nuclear_fission.f90
-    └── pressure_dynamics.f90
+    └── heat_transfer.f90
 ```
 
 ## 📖 Dependencies
@@ -315,12 +313,22 @@ If you use this library in your research, please cite:
 
 ## 📋 Version History
 
+<details open>
+<summary><b>v0.3.0 (current)</b></summary>
+
+- Majorly reworked simulation (thanks to @fxllenfx)
+- Added subsystems
+- Fixed an issue with heat transfer using unstable solver
+- Further improved performance
+</details>
+
 <details>
-<summary><b>v0.2.0 (current)</b></summary>
+<summary><b>v0.2.0</b></summary>
 
 - Enhanced neutronics models
 - Improved fluid dynamics simulation
 - Consistent testing suite
+- Implement basic multithreading for neutron transport
 </details>
 
 <details>
@@ -338,6 +346,6 @@ If you use this library in your research, please cite:
 
 **Note**: This library is intended for educational and research purposes.
 
-Made with ❤️ and 🧠 by [Steve](https://github.com/PolskaKrowa)
+Founded by [Steve](https://github.com/PolskaKrowa)
 
 </div>

@@ -92,9 +92,21 @@ target_link_libraries(nuclear_physics_kernels nuclear_physics_core ${LAPACK_LIBR
 
 add_subdirectory(tests)
 
-# Models library (depends on kernels and core)
-add_subdirectory(models)
+# Physics-models library (depends on kernels and core).
+# Lives under physics/ since the directory was renamed from models/ as part of
+# the phase-1 reorg (see docs/design/bwr4_physics_spec/REORG_PLAN.md step 1).
+# Library target name kept as nuclear_physics_models for C-ABI continuity.
+add_subdirectory(physics)
 target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_physics_core)
+
+# Subsystems library — one module per spec chapter (vessel, fuel, crd,
+# recirculation, main_steam, feedwater) implementing the 5-call contract
+# from REORG_PLAN §3. Step 2 wires only the skeleton; subsystem-level
+# behaviour migrates in steps 3-7.
+add_subdirectory(subsystems)
+# Step 11 (reorg): fuel.f90 imports two_phase_flow for the heat↔two-phase
+# convection-coefficient helper, so subsystems must compile after models.
+target_link_libraries(nuclear_physics_subsystems nuclear_physics_models nuclear_physics_core)
 
 # C Interface library
 add_subdirectory(interface)
@@ -163,6 +175,7 @@ message(STATUS "  Libraries:")
 message(STATUS "    - nuclear_physics_core")
 message(STATUS "    - nuclear_physics_kernels")
 message(STATUS "    - nuclear_physics_models")
+message(STATUS "    - nuclear_physics_subsystems")
 message(STATUS "    - nuclear_physics_c (C interface)")
 message(STATUS "")
 message(STATUS "  Examples:")

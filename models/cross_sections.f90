@@ -186,23 +186,23 @@ contains
     !> Get cross sections with feedback applied
     subroutine xslib_get_xsec(library, material_name, T_fuel, rho_mod, burnup, &
                               xsec, Xe_conc, Sm_conc, boron_ppm)
-        type(xsec_library_t), intent(in) :: library
+        type(xsec_library_t), intent(in), target :: library
         character(len=*), intent(in) :: material_name
         real(wp), intent(in) :: T_fuel
         real(wp), intent(in) :: rho_mod
         real(wp), intent(in) :: burnup
-        type(mg_xsec_t), intent(out) :: xsec
+        type(mg_xsec_t), intent(inout) :: xsec
         real(wp), intent(in), optional :: Xe_conc, Sm_conc, boron_ppm
-        
-        type(xsec_material_t) :: mat
+
+        type(xsec_material_t), pointer :: mat
         integer :: i
         logical :: found
-        
-        ! Find material
+
+        ! Find material — pointer association avoids deep-copying allocatable components
         found = .false.
         do i = 1, library%n_materials
             if (trim(library%materials(i)%name) == trim(material_name)) then
-                mat = library%materials(i)
+                mat => library%materials(i)
                 found = .true.
                 exit
             end if
@@ -223,8 +223,16 @@ contains
             call xslib_apply_moderator_temperature(xsec, T_fuel, mat%T_ref, mat%alpha_mod)
         end if
         
-        ! Apply density feedback
-        call xslib_apply_moderator_density(xsec, rho_mod, mat%rho_ref, mat%alpha_rho)
+        ! Apply density feedback — moderator only. For fuel cells the caller
+        ! still passes the *moderator* density (water in the channel) as
+        ! rho_mod, but mat%rho_ref is the UO2 density (~10.97 g/cm³). The
+        ! ratio rho_mod/rho_ref would scale fuel sigmas by ~0.07, killing
+        ! absorption + capture and corrupting k_eff. The fuel density is
+        ! essentially fixed; density-feedback on the fuel material doesn't
+        ! make physical sense.
+        if (.not. mat%is_fuel) then
+            call xslib_apply_moderator_density(xsec, rho_mod, mat%rho_ref, mat%alpha_rho)
+        end if
         
         ! Apply burnup
         if (burnup > TOL_DEFAULT) then
@@ -257,10 +265,25 @@ contains
         real(wp) :: delta_T, factor, alpha_doppler
         
         delta_T = T_fuel - T_ref
-        
-        ! Doppler broadening primarily affects resonance absorption
-        ! σ_a(T) ≈ σ_a(T_ref) * sqrt(T_ref / T)
-        
+
+        ! Doppler factor: V-shaped around T_ref so behaviour is correct on both sides.
+        !
+        ! T < T_ref (cold startup, ~560 K): sqrt(T_ref/T) > 1 — more absorption at
+        !   cold temperatures, keeps deeply-inserted core subcritical.  Unchanged from
+        !   cold-calibrated XS values.
+        !
+        ! T > T_ref (hot operation, >900 K): sqrt(T/T_ref) > 1 — U238 resonance
+        !   broadening increases absorption as fuel heats, providing negative Doppler
+        !   feedback.  Previously this was sqrt(T_ref/T) which gave the wrong sign
+        !   (positive feedback → thermal runaway on rod withdrawal).
+        !
+        ! Both branches equal 1.0 exactly at T = T_ref, so there is no discontinuity.
+        if (T_fuel >= T_ref) then
+            factor = sqrt(T_fuel / T_ref)
+        else
+            factor = sqrt(T_ref / max(T_fuel, 300.0_wp))
+        end if
+
         do g = 1, xsec%n_groups
             if (g == 1) then
                 ! Fast group - small Doppler effect
@@ -269,13 +292,11 @@ contains
                 ! Thermal group - larger Doppler effect
                 alpha_doppler = -3.0e-5_wp  ! -3 pcm/K typical
             end if
-            
+
             if (present(alpha_D)) then
                 if (g <= size(alpha_D)) alpha_doppler = alpha_D(g)
             end if
-            
-            ! Temperature-dependent resonance absorption
-            factor = sqrt(T_ref / max(T_fuel, 300.0_wp))
+
             xsec%sigma_a(g) = xsec%sigma_a(g) * factor * (1.0_wp + alpha_doppler * delta_T / 1.0e5_wp)
             
             ! Resonance fission also affected

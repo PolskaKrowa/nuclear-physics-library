@@ -28,8 +28,6 @@ program bwr_core_simulator
     use burnup_depletion
     use heat_transfer
     use two_phase_flow
-    use fluid_dynamics
-    use pressure_dynamics
     use rng, only: rng_seed
 
     implicit none
@@ -448,8 +446,10 @@ contains
 
         ! ── Physics initialisations ──────────────────
         sim%sat_temperature  = sat_temp_K(sim%pressure_operating)
-        sim%Lbase            = sim%core_height + 1.5_wp
-        sim%Lrx              = 1.5_wp
+        ! Normal BWR setpoint: ~0.5 m above top of active fuel.
+        sim%Lbase            = (0.5_wp + sim%core_height) &
+                             * (coolant_density_gl(sim%inlet_temperature) / 1000.0_wp)
+        sim%Lrx              = calc_reactor_level(sim%Lbase, sim%inlet_temperature, sim%core_height)
         sim%avg_coolant_temp = sim%inlet_temperature
         sim%coolant_T_prev1  = sim%inlet_temperature
         sim%coolant_T_prev2  = sim%inlet_temperature

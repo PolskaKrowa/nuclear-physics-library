@@ -55,7 +55,7 @@ module burnup_depletion
     real(wp), parameter :: GAMMA_SM149 = 0.0_wp     ! Direct Sm-149 (negligible)
     
     ! Microscopic cross sections [barns]
-    real(wp), parameter :: SIGMA_A_XE135 = 2.65e6_wp    ! Huge!
+    real(wp), parameter :: SIGMA_A_XE135 = 2.65e6_wp
     real(wp), parameter :: SIGMA_A_SM149 = 4.08e4_wp
     real(wp), parameter :: SIGMA_A_U235 = 680.9_wp
     real(wp), parameter :: SIGMA_F_U235 = 585.1_wp

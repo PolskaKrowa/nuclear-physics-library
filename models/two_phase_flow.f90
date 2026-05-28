@@ -194,7 +194,19 @@ contains
         state%flow_regime = REGIME_SINGLE_PHASE
         state%chf_ratio = 1.0e10_wp
         state%boiling = .false.
-        
+
+        ! Step-11: initialise water properties at the default (T, p)
+        ! so that downstream consumers (e.g. fuel_compute_convection_
+        ! coefficients) can be called before the first two_phase_step.
+        ! Without this, props%mu_l / props%k_l default to 0 and the
+        ! Dittus-Boelter helper degenerates.
+        block
+            type(water_properties_t) :: w
+            w = get_water_properties(state%temperature(1, 1, 1), &
+                                     state%pressure(1, 1, 1))
+            state%props = w
+        end block
+
         ! Configuration
         if (present(config)) then
             state%config = config
