@@ -91,12 +91,7 @@ add_subdirectory(kernels)
 target_link_libraries(nuclear_physics_kernels nuclear_physics_core ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
 
 add_subdirectory(tests)
-
-# Physics-models library (depends on kernels and core).
-# Lives under physics/ since the directory was renamed from models/ as part of
-# the phase-1 reorg (see docs/design/bwr4_physics_spec/REORG_PLAN.md step 1).
-# Library target name kept as nuclear_physics_models for C-ABI continuity.
-add_subdirectory(physics)
+add_subdirectory(models)
 target_link_libraries(nuclear_physics_models nuclear_physics_kernels nuclear_physics_core)
 
 # Subsystems library — one module per spec chapter (vessel, fuel, crd,
