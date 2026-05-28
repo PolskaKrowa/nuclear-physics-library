@@ -58,9 +58,10 @@ target_link_libraries(pde core)
 # Physics models
 add_library(models
     ../models/heat_transfer.f90
-    ../models/fluid_dynamics.f90
-    ../models/nuclear_fission.f90
-    ../models/pressure_dynamics.f90
+    ../models/burnup_depletion.f90
+    ../models/cross_sections.f90
+    ../models/multigroup_diffusion.f90
+    ../models/two_phase_flow.f90
 )
 target_link_libraries(models core linalg pde)
 
