@@ -55,27 +55,41 @@ add_library(pde
 )
 target_link_libraries(pde core)
 
-# Physics models
+# Physics models (lives under physics/ after the reorg step-1 rename).
 add_library(models
     ../models/heat_transfer.f90
-    ../models/burnup_depletion.f90
-    ../models/cross_sections.f90
-    ../models/multigroup_diffusion.f90
     ../models/two_phase_flow.f90
+    ../models/multigroup_diffusion.f90
+    ../models/cross_sections.f90
+    ../models/burnup_depletion.f90
 )
 target_link_libraries(models core linalg pde)
+
+# Subsystems library (reorg step 2). Adds modules incrementally as each
+# reorg step lights them up; the other modules still compile via the
+# top-level build.
+add_library(subsystems_test
+    ../subsystems/vessel.f90
+    ../subsystems/crd.f90
+    ../subsystems/main_steam.f90
+    ../subsystems/feedwater.f90
+    ../subsystems/recirculation.f90
+    ../subsystems/fuel.f90
+)
+target_link_libraries(subsystems_test core linalg models pde)
 
 # Test executable
 add_executable(test_suite test_suite.f90)
 target_link_options(test_suite PRIVATE "-Wl,-z,noexecstack")
-target_link_libraries(test_suite 
-    core 
-    linalg 
-    ode 
-    optimisation 
-    pde 
+target_link_libraries(test_suite
+    core
+    linalg
+    ode
+    optimisation
+    pde
     models
-    ${BLAS_LIBRARIES} 
+    subsystems_test
+    ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
 )
 
