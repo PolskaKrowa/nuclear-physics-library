@@ -297,12 +297,9 @@ If you use this library in your research, please cite:
 ## 🗺️ Roadmap
 
 ### 🔮 Planned Features
-- [ ] MPI parallelisation for distributed computing
 - [ ] Python bindings via f2py
 - [ ] I/O and Visualisation (HDF5, VTK, etc.)
 - [ ] Reactor control modules
-- [ ] Material Properties database
-- [ ] Detailed fuel modelling
 - [ ] Enhanced testing suite (unit tests, benchmarks, verification tests)
 
 ### 🚧 In Progress
@@ -310,6 +307,9 @@ If you use this library in your research, please cite:
 - [ ] Advanced turbulence models
 - [x] OpenMP threading for shared-memory systems
 - [x] Improved performance for real-time/faster-than-real-time simulation
+- [ ] GPU Computing via CUDA Fortran
+- [x] Material Properties database
+- [x] Detailed fuel modelling
 
 ## 📋 Version History
 
