@@ -91,8 +91,9 @@ contains
         procedure(jacobian_interface), optional :: jac
         
         real(wp) :: t, tf, dt
-        real(wp) :: y(size(y0))
+        real(wp) :: y(size(y0)), y_new(size(y0))
         integer :: n, step, max_outputs, output_idx, newton_iters
+        logical :: reached_final
         
         ! Initialize
         n = size(y0)
@@ -125,19 +126,22 @@ contains
         y_out(:, output_idx) = y
         
         ! Integration loop
+        reached_final = .false.
         do step = 1, config%max_steps
             ! Adjust final step if needed
             if (t + dt > tf) then
                 dt = tf - t
             end if
             
-            ! Take Backward Euler step
+            ! Take Backward Euler step (use temp to avoid aliasing y as
+            ! both intent(in) and intent(out) — undefined behaviour.)
             if (present(jac)) then
-                call beuler_step_analytical(func, jac, t, y, dt, config, y, &
+                call beuler_step_analytical(func, jac, t, y, dt, config, y_new, &
                                            newton_iters, status%code)
             else
-                call beuler_step_fd(func, t, y, dt, config, y, newton_iters, status%code)
+                call beuler_step_fd(func, t, y, dt, config, y_new, newton_iters, status%code)
             end if
+            y = y_new
             
             ! Check for Newton convergence failure
             if (status%code /= BEULER_SUCCESS) then
@@ -161,20 +165,25 @@ contains
             
             ! Check if we've reached the final time
             if (abs(t - tf) < epsilon(1.0_wp)) then
-                status%code = BEULER_SUCCESS
+                reached_final = .true.
                 status%final_time = t
                 exit
             end if
         end do
         
         ! Trim output arrays
+        if (output_idx > max_outputs) output_idx = max_outputs
         if (output_idx < max_outputs) then
             t_out = t_out(1:output_idx)
             y_out = y_out(:, 1:output_idx)
         end if
         
-        ! Check if max steps exceeded
-        if (status%code /= BEULER_SUCCESS) then
+        ! Check if max steps exceeded (status%code defaults to SUCCESS, so use
+        ! an explicit reached_final flag — the previous `if (status%code /=
+        ! BEULER_SUCCESS)` test was always false after a successful step.)
+        if (reached_final) then
+            status%code = BEULER_SUCCESS
+        else
             status%code = BEULER_ERR_MAX_STEPS
             status%final_time = t
         end if
@@ -221,6 +230,7 @@ contains
             ! Check convergence
             if (res_norm < config%newton_tol) then
                 newton_iters = iter
+                deallocate(ipiv)
                 return
             end if
             
@@ -238,6 +248,7 @@ contains
             if (info /= 0) then
                 error_code = BEULER_ERR_SINGULAR_JACOBIAN
                 newton_iters = iter
+                deallocate(ipiv)
                 return
             end if
             

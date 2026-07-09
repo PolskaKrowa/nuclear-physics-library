@@ -705,7 +705,12 @@ contains
         converged = state%converged
     end subroutine mg_solve_fixed_source
     
-    !> Optimised parallel group equation solver
+    !> Optimised parallel group equation solver.
+    !! Uses a Jacobi-style sweep (reads neighbour fluxes from a snapshot
+    !! copy, writes to state%flux) so the OpenMP parallel do is race-free.
+    !! The previous in-place Gauss-Seidel-style sweep was racy: threads
+    !! read state%flux(i±1,j,k,g) etc. that other threads were concurrently
+    !! updating, producing non-deterministic results.
     subroutine solve_group_equation_safe(state, g)
         type(mg_state_t), intent(inout) :: state
         integer, intent(in) :: g
@@ -715,6 +720,7 @@ contains
         real(wp) :: phi_xp, phi_xm, phi_yp, phi_ym, phi_zp, phi_zm
         real(wp) :: coef_x, coef_y, coef_z, coef_c, rhs, denom, phi_new
         real(wp) :: k_eff_inv
+        real(wp), allocatable :: flux_snap(:,:,:)
         real(wp), parameter :: MIN_DENOM = 1.0e-10_wp
         real(wp), parameter :: MAX_FLUX = 1.0e15_wp
         real(wp), parameter :: RELAX = 0.8_wp
@@ -722,6 +728,14 @@ contains
         
         ! Pre-compute k_eff inverse to avoid division in inner loop
         k_eff_inv = 1.0_wp / max(state%k_eff, 0.005_wp)
+        
+        ! Take a snapshot of the current group-g flux so neighbour reads
+        ! are race-free under OpenMP. Only group g is snapshotted because
+        ! only group g is being updated; in-scattering reads from other
+        ! groups (state%flux(i,j,k,gp)) are not being written by this
+        ! sweep, so they are safe to read in place.
+        allocate(flux_snap(state%nx, state%ny, state%nz))
+        flux_snap = state%flux(:,:,:,g)
         
         ! Cache-friendly loop order: k, j, i (matches memory layout)
         !$OMP PARALLEL DO PRIVATE(i, j, D, sigma_r, phi_xm, phi_xp, phi_ym, phi_yp, &
@@ -736,13 +750,16 @@ contains
                     D = state%xsec(i, j, k)%D(g)
                     sigma_r = state%xsec(i, j, k)%sigma_r(g)
                     
-                    ! Get neighbour fluxes (6 accesses, can't avoid these)
-                    phi_xm = max(state%flux(i-1, j, k, g), 0.0_wp)
-                    phi_xp = max(state%flux(i+1, j, k, g), 0.0_wp)
-                    phi_ym = max(state%flux(i, j-1, k, g), 0.0_wp)
-                    phi_yp = max(state%flux(i, j+1, k, g), 0.0_wp)
-                    phi_zm = max(state%flux(i, j, k-1, g), 0.0_wp)
-                    phi_zp = max(state%flux(i, j, k+1, g), 0.0_wp)
+                    ! Get neighbour fluxes from the snapshot (Jacobi:
+                    ! race-free under OpenMP). The previous code read
+                    ! state%flux(i±1,j,k,g) directly, which raced with
+                    ! other threads' in-place updates.
+                    phi_xm = max(flux_snap(i-1, j, k), 0.0_wp)
+                    phi_xp = max(flux_snap(i+1, j, k), 0.0_wp)
+                    phi_ym = max(flux_snap(i, j-1, k), 0.0_wp)
+                    phi_yp = max(flux_snap(i, j+1, k), 0.0_wp)
+                    phi_zm = max(flux_snap(i, j, k-1), 0.0_wp)
+                    phi_zp = max(flux_snap(i, j, k+1), 0.0_wp)
                     
                     ! Diffusion coefficients (use pre-computed grid spacings)
                     coef_x = D * state%inv_dx2
@@ -751,7 +768,9 @@ contains
                     coef_c = state%two_inv_dx2 + state%two_inv_dy2 + state%two_inv_dz2
                     coef_c = coef_c * D
                     
-                    ! In-scattering (manual loop unrolling for common cases)
+                    ! In-scattering (manual loop unrolling for common cases).
+                    ! Reads state%flux(i,j,k,gp) for gp /= g — safe because
+                    ! those entries are not being written by this sweep.
                     inscatter = 0.0_wp
                     if (state%n_groups == 2) then
                         ! Optimised path for 2-group
@@ -788,9 +807,12 @@ contains
                     ! Denominator
                     denom = max(coef_c + sigma_r, MIN_DENOM)
                     
-                    ! Update flux with relaxation (use pre-computed constant)
+                    ! Update flux with relaxation. Use the snapshot value
+                    ! for the relaxation term so the iteration is a true
+                    ! Jacobi update (not a hybrid that mixes snapshot and
+                    ! in-place values).
                     phi_new = rhs / denom
-                    phi_new = RELAX * phi_new + ONE_MINUS_RELAX * state%flux(i, j, k, g)
+                    phi_new = RELAX * phi_new + ONE_MINUS_RELAX * flux_snap(i, j, k)
                     
                     ! Clamp
                     phi_new = max(min(phi_new, MAX_FLUX), 0.0_wp)
@@ -800,6 +822,8 @@ contains
             end do
         end do
         !$OMP END PARALLEL DO
+        
+        deallocate(flux_snap)
         
         call apply_boundary_conditions(state, g)
     end subroutine solve_group_equation_safe

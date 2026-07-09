@@ -211,6 +211,9 @@ program bwr_core_simulator_opengl
 
         ! Feedwater temperature
         real(wp) :: feedwater_temp     ! [K]
+
+        ! Pin-by-pin material mask: .true. = fuel, .false. = moderator.
+        logical, allocatable :: fuel_mask(:, :, :)
     end type simulation_t
 
     ! ── Visualisation state ─────────────────────────────────────
@@ -719,6 +722,11 @@ contains
                     r = sqrt((x - sim%core_diameter/2)**2 + (y - sim%core_diameter/2)**2)
                     if (r > sim%core_diameter / 2.2_wp) in_fuel = .false.
 
+                    ! Store the material mask for update_cross_sections_feedback.
+                    if (allocated(sim%fuel_mask)) then
+                        sim%fuel_mask(i, j, k) = in_fuel
+                    end if
+
                     if (in_fuel) then
                         call mg_set_cross_sections(sim%neutronics, xsec_fuel%xsec_base, &
                             i, i, j, j, k, k)
@@ -763,7 +771,7 @@ contains
         sim%alpha_doppler = -3.5_wp   ! pcm/K
         sim%alpha_void    = -80.0_wp  ! pcm/(% void)
 
-        sim%rod_bank_position = 0.95_wp  ! start 95 % inserted
+        sim%rod_bank_position = 0.30_wp  ! start 30 % inserted (startup)
 
         ! ── Physics initialisations ──────────────────
         ! Saturation temperature at nominal pressure (sat_temp_K at 7.14 MPa ≈ 286°C = 559 K)
@@ -800,6 +808,10 @@ contains
 
         ! ── Cross-section library ─────────────────────────────────
         call xslib_init(sim%xslib, n_groups=2)
+
+        ! Allocate the fuel/material mask used by update_cross_sections_feedback
+        allocate(sim%fuel_mask(sim%nx, sim%ny, sim%nz))
+        sim%fuel_mask = .false.
 
         ! Fuel cross-sections
         xsec_fuel%name       = "UO2_35"
@@ -899,10 +911,13 @@ contains
         real(wp), parameter :: P_LOSS_COEF= 1.125e6_wp  ! Pa s⁻¹ at 100 % valve, nominal P
         real(wp), parameter :: P_NOMINAL  = 7.14e6_wp   ! Pa
 
-        ! 3-point smoothing of coolant temperature
+        ! 3-point smoothing of coolant temperature.
+        ! Compute the average BEFORE advancing the history buffers,
+        ! otherwise prev1 collapses to the current value and the
+        ! average degenerates to (2*current + old_prev1)/3.
+        T_mean_smooth = (sim%avg_coolant_temp + sim%coolant_T_prev1 + sim%coolant_T_prev2) / 3.0_wp
         sim%coolant_T_prev2 = sim%coolant_T_prev1
         sim%coolant_T_prev1 = sim%avg_coolant_temp
-        T_mean_smooth = (sim%avg_coolant_temp + sim%coolant_T_prev1 + sim%coolant_T_prev2) / 3.0_wp
 
         ! Saturation temperature at current pressure (sat_temp polynomial)
         T_sat = sat_temp_K(sim%pressure_operating)
@@ -1052,8 +1067,10 @@ contains
 
         integer  :: i, j, k
         type(mg_xsec_t) :: xsec
+        type(xsec_material_t) :: xsec_fuel, xsec_water
         real(wp) :: T_fuel, rho_mod, rf, rf_ref, rho_mod_corrected
         real(wp) :: node_bottom, node_top, rod_tip, inserted_fraction, H_core
+        logical  :: found_fuel, found_water
 
         ! Reference rf at nominal void (30 % void) used for normalisation
         ! so the correction is unity at design conditions.
@@ -1062,37 +1079,46 @@ contains
         ! Current bulk void reactivity factor
         rf = sim%rf_void   ! updated in update_instrumentation
 
+        ! Fetch both materials once (previously the loop fetched "UO2_35"
+        ! for EVERY cell, overwriting water cells with fuel+rod XS).
+        call xslib_get_material(sim%xslib, "UO2_35", xsec_fuel,  found_fuel)
+        call xslib_get_material(sim%xslib, "H2O",    xsec_water, found_water)
+
         do k = 1, sim%nz
             do j = 1, sim%ny
                 do i = 1, sim%nx
                     T_fuel  = T(i, j, k)
                     rho_mod = rho(i, j, k)
 
-                    ! scale effective moderator density
-                    ! by the ratio rf/rf_ref.  rf < 1 at high bulk void →
-                    ! reduced moderation density seen by the cross-section library.
                     rho_mod_corrected = rho_mod * (rf / max(1.0e-9_wp, rf_ref))
 
-                    call xslib_get_xsec(sim%xslib, "UO2_35", &
-                        T_fuel, rho_mod_corrected, sim%burnup%burnup(i, j, k), xsec, &
-                        Xe_conc = sim%burnup%Xe135(i, j, k), &
-                        Sm_conc = sim%burnup%Sm149(i, j, k))
+                    ! Use fuel_mask to pick the right base material.
+                    if (allocated(sim%fuel_mask) .and. sim%fuel_mask(i, j, k)) then
+                        call xslib_get_xsec(sim%xslib, "UO2_35", &
+                            T_fuel, rho_mod_corrected, sim%burnup%burnup(i, j, k), xsec, &
+                            Xe_conc = sim%burnup%Xe135(i, j, k), &
+                            Sm_conc = sim%burnup%Sm149(i, j, k))
 
-                    ! Control rod insertion (BWR bottom-entry)
-                    H_core      = real(sim%nz, wp) * sim%dz
-                    node_bottom = real(k-1, wp) * sim%dz
-                    node_top    = real(k,   wp) * sim%dz
-                    rod_tip     = sim%rod_bank_position * H_core
+                        ! Control rod insertion (BWR bottom-entry, fuel cells only)
+                        H_core      = real(sim%nz, wp) * sim%dz
+                        node_bottom = real(k-1, wp) * sim%dz
+                        node_top    = real(k,   wp) * sim%dz
+                        rod_tip     = sim%rod_bank_position * H_core
 
-                    inserted_fraction = 0.0_wp
-                    if (rod_tip >= node_top) then
-                        inserted_fraction = 1.0_wp
-                    else if (rod_tip > node_bottom) then
-                        inserted_fraction = (rod_tip - node_bottom) / sim%dz
+                        inserted_fraction = 0.0_wp
+                        if (rod_tip >= node_top) then
+                            inserted_fraction = 1.0_wp
+                        else if (rod_tip > node_bottom) then
+                            inserted_fraction = (rod_tip - node_bottom) / sim%dz
+                        end if
+
+                        if (inserted_fraction > 0.0_wp) &
+                            call xslib_apply_control_rod(xsec, inserted_fraction)
+                    else
+                        ! Water cell: get water XS with moderator feedback
+                        call xslib_get_xsec(sim%xslib, "H2O", &
+                            T_fuel, rho_mod_corrected, 0.0_wp, xsec)
                     end if
-
-                    if (inserted_fraction > 0.0_wp) &
-                        call xslib_apply_control_rod(xsec, inserted_fraction)
 
                     call mg_set_cross_sections(sim%neutronics, xsec, i, i, j, j, k, k)
                 end do
@@ -1113,8 +1139,17 @@ contains
         real(wp) :: temperature(sim%nx, sim%ny, sim%nz)
         real(wp) :: void_fraction(sim%nx, sim%ny, sim%nz)
         real(wp) :: density(sim%nx, sim%ny, sim%nz)
-        real(wp), parameter :: rho_liquid = 738.0_wp
-        real(wp), parameter :: rho_vapor  = 0.038_wp
+        ! Densities in g/cm³ to match the XS library contract
+        ! (xsec_water%rho_ref = 0.74). 738 kg/m³ = 0.738 g/cm³;
+        ! saturated-steam density at 7 MPa ≈ 37 kg/m³ = 0.037 g/cm³.
+        real(wp), parameter :: rho_liquid = 0.738_wp   ! g/cm³ (for XS feedback)
+        real(wp), parameter :: rho_vapor  = 0.037_wp   ! g/cm³ (for XS feedback)
+        ! Density in kg/m³ for the velocity / Reynolds calculation.
+        ! Using rho_liquid (g/cm³) here would give v = 1500/0.738 = 2033 m/s
+        ! (Mach 6!) instead of the correct 2.03 m/s. The 1000× velocity
+        ! caused the explicit heat_step convection term to produce ~10000 K/s
+        ! temperature swings, driving fuel T to the 3000 K clamp.
+        real(wp), parameter :: rho_liquid_kgm3 = 738.0_wp  ! kg/m³
         logical  :: converged
         real(wp) :: v_coolant, Re, h_conv
         real(wp), parameter :: D_h     = 0.01_wp
@@ -1123,10 +1158,11 @@ contains
         real(wp), parameter :: Pr      = 0.9_wp
 
         ! ── Convective flow setup ─────────────────────────────────
-        v_coolant = sim%mass_flux_core / rho_liquid
+        ! Use kg/m³ density so units are consistent: [kg/m²·s] / [kg/m³] = [m/s].
+        v_coolant = sim%mass_flux_core / rho_liquid_kgm3
         if (allocated(sim%heat%vz)) sim%heat%vz = v_coolant
 
-        Re     = rho_liquid * v_coolant * D_h / mu
+        Re     = rho_liquid_kgm3 * v_coolant * D_h / mu
         h_conv = 0.023_wp * Re**0.8_wp * Pr**0.4_wp * k_fluid / D_h
 
         ! ── Neutronics ────────────────────────────────────────────
@@ -1140,7 +1176,10 @@ contains
         sim%avg_burnup = sum(sim%burnup%burnup) / size(sim%burnup%burnup)
 
         ! ── Heat transfer ─────────────────────────────────────────
-        sim%heat%q = power
+        ! mg_get_power returns W/cm³; heat%q expects W/m³ (factor 10⁶).
+        ! (Previous code wrote W/cm³ directly into a field documented as
+        ! W/m³, suppressing fuel heating by 10⁶.)
+        sim%heat%q = power * 1.0e6_wp
         call heat_step(sim%heat, dt)
         temperature       = sim%heat%T
         sim%max_fuel_temp = maxval(temperature)
@@ -1204,7 +1243,7 @@ contains
         real(wp) :: density(sim%nx, sim%ny, sim%nz)
         real(wp) :: error
         real(wp), parameter :: rho_liquid = 0.738_wp
-        real(wp), parameter :: rho_vapor  = 0.038_wp
+        real(wp), parameter :: rho_vapor  = 0.037_wp
         logical  :: converged
 
         do iter = 1, 50
@@ -1215,7 +1254,8 @@ contains
             call mg_get_power(sim%neutronics, power)
             sim%power_current = sim%neutronics%total_power
 
-            sim%heat%q = power
+            ! mg_get_power returns W/cm³; heat%q expects W/m³ (factor 10⁶).
+            sim%heat%q = power * 1.0e6_wp
             call heat_step_implicit(sim%heat, 1.0_wp)
             temperature       = sim%heat%T
             sim%max_fuel_temp = maxval(temperature)
@@ -1509,6 +1549,7 @@ contains
         call two_phase_destroy(sim%thermalhydraulics)
         call burnup_destroy(sim%burnup)
         call xslib_destroy(sim%xslib)
+        if (allocated(sim%fuel_mask)) deallocate(sim%fuel_mask)
 
         sim%initialized = .false.
     end subroutine cleanup_simulation

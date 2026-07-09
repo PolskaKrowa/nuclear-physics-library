@@ -244,19 +244,22 @@ contains
         real(wp), intent(in) :: dt                   ! Time step [s]
         
         integer :: i, j, k
-        real(wp) :: phi_th, P, dt_sub
+        real(wp) :: phi_th, P
         
-        ! Substep for improved accuracy
-        dt_sub = dt / real(state%config%depletion_substeps, wp)
-        
+        ! Note: deplete_cell handles its own substepping internally
+        ! (it divides dt by n_substeps). The previous code here ALSO
+        ! divided dt by n_substeps and then passed the already-divided
+        ! value to deplete_cell, which divided AGAIN — so each cell
+        ! only advanced by dt/n_substeps² instead of dt. We now pass
+        ! the full dt to deplete_cell and let it do the substepping.
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
                     phi_th = flux(i, j, k) * state%config%thermal_flux_fraction
                     P = power(i, j, k)
                     
-                    ! Deplete each cell
-                    call deplete_cell(state, i, j, k, phi_th, P, dt_sub, &
+                    ! Deplete each cell (full dt; deplete_cell substeps internally)
+                    call deplete_cell(state, i, j, k, phi_th, P, dt, &
                                      state%config%depletion_substeps)
                 end do
             end do
@@ -266,30 +269,47 @@ contains
         state%steps = state%steps + 1
     end subroutine burnup_step
     
-    !> Predictor-corrector depletion step
+    !> Predictor-corrector depletion step.
+    !! Saves the initial state BEFORE the predictor, then averages the
+    !! initial and predicted concentrations. (Previously the copy was
+    !! taken AFTER burnup_step had already advanced the state, so the
+    !! "corrector" averaged the state with itself — a no-op.)
     subroutine burnup_step_predictor_corrector(state, flux, power, dt)
         type(burnup_state_t), intent(inout) :: state
         real(wp), intent(in) :: flux(:, :, :)
         real(wp), intent(in) :: power(:, :, :)
         real(wp), intent(in) :: dt
         
-        type(burnup_state_t) :: state_pred
+        type(burnup_state_t) :: state_init, state_pred
         integer :: i, j, k
-        real(wp) :: phi_th, P
+        
+        ! Save initial state BEFORE the predictor step.
+        state_init = state
         
         ! Predictor: full step with initial conditions
         call burnup_step(state, flux, power, dt)
-        
-        ! Store predicted state
         state_pred = state
         
-        ! Corrector: use average of initial and predicted
-        ! (Simplified - full implementation would iterate)
+        ! Corrector: average initial and predicted concentrations.
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
-                    state%Xe135(i, j, k) = 0.5_wp * (state%Xe135(i, j, k) + state_pred%Xe135(i, j, k))
-                    state%Sm149(i, j, k) = 0.5_wp * (state%Sm149(i, j, k) + state_pred%Sm149(i, j, k))
+                    state%Xe135(i, j, k) = 0.5_wp * (state_init%Xe135(i, j, k) + &
+                                                     state_pred%Xe135(i, j, k))
+                    state%I135(i, j, k)  = 0.5_wp * (state_init%I135(i, j, k)  + &
+                                                     state_pred%I135(i, j, k))
+                    state%Sm149(i, j, k) = 0.5_wp * (state_init%Sm149(i, j, k) + &
+                                                     state_pred%Sm149(i, j, k))
+                    state%Pm149(i, j, k) = 0.5_wp * (state_init%Pm149(i, j, k) + &
+                                                     state_pred%Pm149(i, j, k))
+                    state%U235(i, j, k)  = 0.5_wp * (state_init%U235(i, j, k)  + &
+                                                     state_pred%U235(i, j, k))
+                    state%U238(i, j, k)  = 0.5_wp * (state_init%U238(i, j, k)  + &
+                                                     state_pred%U238(i, j, k))
+                    state%Pu239(i, j, k) = 0.5_wp * (state_init%Pu239(i, j, k) + &
+                                                     state_pred%Pu239(i, j, k))
+                    state%Pu241(i, j, k) = 0.5_wp * (state_init%Pu241(i, j, k) + &
+                                                     state_pred%Pu241(i, j, k))
                 end do
             end do
         end do

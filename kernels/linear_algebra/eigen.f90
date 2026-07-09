@@ -22,6 +22,7 @@ module eigen
     integer(i32), parameter, public :: EIGEN_ERR_SIZE = 1
     integer(i32), parameter, public :: EIGEN_ERR_LAPACK = 2
     integer(i32), parameter, public :: EIGEN_ERR_CONVERGENCE = 3
+    integer(i32), parameter, public :: EIGEN_ERR_SINGULAR = 4
     
     ! Interface for DGEES select function
     abstract interface
@@ -479,7 +480,12 @@ contains
         deallocate(v, v_new)
     end subroutine power_iteration
     
-    !> Inverse iteration to find eigenvector for known eigenvalue
+    !> Inverse iteration to find eigenvector for known eigenvalue.
+    !! Solves (A - mu*I) * v_new = v repeatedly and renormalises.
+    !! Returns EIGEN_SUCCESS on convergence, EIGEN_ERR_SINGULAR if
+    !! (A - mu*I) is exactly singular (mu is an exact eigenvalue — caller
+    !! should perturb mu), EIGEN_ERR_SIZE on bad input,
+    !! EIGEN_ERR_CONVERGENCE on non-convergence within max_iter.
     subroutine inverse_iteration(A, mu, eigenvector, max_iter, tol, status)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(in) :: mu  ! Approximate eigenvalue
@@ -488,10 +494,13 @@ contains
         real(wp), intent(in), optional :: tol
         integer(i32), intent(out), optional :: status
         
-        real(wp), allocatable :: A_shift(:, :), v(:), v_new(:)
-        real(wp) :: norm_v, tolerance
-        integer :: n, iter, max_iterations, i
-        integer(i32) :: solve_status
+        real(wp), allocatable :: A_shift(:, :), v(:), v_new(:), rhs(:)
+        integer, allocatable :: ipiv(:)
+        real(wp) :: norm_v, tolerance, resid
+        integer :: n, iter, max_iterations, i, info
+        
+        ! LAPACK dgesv: solve A*X = B (LU with partial pivoting)
+        external :: dgesv
         
         n = size(A, 1)
         max_iterations = 1000
@@ -505,9 +514,14 @@ contains
             return
         end if
         
+        if (n < 1) then
+            if (present(status)) status = EIGEN_ERR_SIZE
+            return
+        end if
+        
         allocate(A_shift(n, n))
-        allocate(v(n))
-        allocate(v_new(n))
+        allocate(v(n), v_new(n), rhs(n))
+        allocate(ipiv(n))
         
         ! Shift matrix: A_shift = A - mu*I
         A_shift = A
@@ -515,35 +529,62 @@ contains
             A_shift(i, i) = A_shift(i, i) - mu
         end do
         
-        ! Initial guess
+        ! Initial guess: normalised all-ones vector
         v = 1.0_wp
         norm_v = sqrt(sum(v**2))
+        if (norm_v < tiny(1.0_wp)) then
+            eigenvector = 0.0_wp
+            if (present(status)) status = EIGEN_ERR_SIZE
+            deallocate(A_shift, v, v_new, rhs, ipiv)
+            return
+        end if
         v = v / norm_v
         
         do iter = 1, max_iterations
-            ! Solve (A - mu*I) * v_new = v
-            ! This requires solve_linear module - simplified here
-            v_new = v  ! Placeholder - actual implementation needs solver
+            rhs = v
+            ! Solve (A - mu*I) * v_new = rhs in place (rhs is overwritten
+            ! with the solution by dgesv).
+            call dgesv(n, 1, A_shift, n, ipiv, rhs, n, info)
             
-            ! Normalise
-            norm_v = sqrt(sum(v_new**2))
-            v_new = v_new / norm_v
-            
-            ! Check convergence
-            if (sqrt(sum((v_new - v)**2)) < tolerance) then
-                eigenvector = v_new
-                if (present(status)) status = EIGEN_SUCCESS
-                deallocate(A_shift, v, v_new)
+            if (info /= 0) then
+                ! A - mu*I is exactly singular: mu is an exact eigenvalue.
+                ! Return the current v as a (rough) eigenvector and signal
+                ! the caller to perturb mu if they want a sharper result.
+                eigenvector = v
+                if (present(status)) status = EIGEN_ERR_SINGULAR
+                deallocate(A_shift, v, v_new, rhs, ipiv)
                 return
             end if
             
+            v_new = rhs
+            
+            ! Renormalise
+            norm_v = sqrt(sum(v_new**2))
+            if (norm_v < tiny(1.0_wp)) then
+                ! Collapse to zero — shouldn't happen for non-singular shift.
+                eigenvector = v
+                if (present(status)) status = EIGEN_ERR_CONVERGENCE
+                deallocate(A_shift, v, v_new, rhs, ipiv)
+                return
+            end if
+            v_new = v_new / norm_v
+            
+            ! Residual-based convergence: ||v_new - v||_2 < tol.
+            resid = sqrt(sum((v_new - v)**2))
             v = v_new
+            if (resid < tolerance) then
+                eigenvector = v
+                if (present(status)) status = EIGEN_SUCCESS
+                deallocate(A_shift, v, v_new, rhs, ipiv)
+                return
+            end if
         end do
         
+        ! Did not converge within max_iter — return best estimate.
         eigenvector = v
         if (present(status)) status = EIGEN_ERR_CONVERGENCE
         
-        deallocate(A_shift, v, v_new)
+        deallocate(A_shift, v, v_new, rhs, ipiv)
     end subroutine inverse_iteration
 
 end module eigen

@@ -16,6 +16,11 @@ set(KERNEL_SOURCES
 
 add_library(nuclear_physics_kernels ${KERNEL_SOURCES})
 
+# backward_euler.f90 and eigen.f90 call LAPACK (dgesv) directly, so the
+# kernels library must link LAPACK/BLAS itself, not just rely on downstream
+# targets to provide them.
+target_link_libraries(nuclear_physics_kernels PUBLIC ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+
 target_include_directories(nuclear_physics_kernels
     PUBLIC
     $<BUILD_INTERFACE:${CMAKE_Fortran_MODULE_DIRECTORY}>

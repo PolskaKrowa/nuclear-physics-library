@@ -75,6 +75,8 @@ add_library(subsystems_test
     ../subsystems/feedwater.f90
     ../subsystems/recirculation.f90
     ../subsystems/fuel.f90
+    ../subsystems/rhr.f90
+    ../subsystems/condensate_loop.f90
 )
 target_link_libraries(subsystems_test core linalg models pde)
 

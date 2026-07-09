@@ -340,6 +340,28 @@ contains
         end do
     end subroutine simple_fft_forward
     
+    !> Simple complex-to-complex DFT forward transform.
+    !! Needed for the 2D FFT: after transforming each row (real→complex),
+    !! the second pass must transform complex→complex. The previous
+    !! implementation called simple_fft_forward(real(temp(i,:)), ...) which
+    !! silently discarded the imaginary part — a mathematically wrong 2D FFT.
+    subroutine simple_fft_forward_complex(x, x_hat)
+        complex(wp), intent(in) :: x(:)
+        complex(wp), intent(out) :: x_hat(:)
+        integer :: n, k, j
+        real(wp) :: theta
+        
+        n = size(x)
+        x_hat = cmplx(0.0_wp, 0.0_wp, wp)
+        
+        do k = 1, n
+            do j = 1, n
+                theta = -TWO_PI * real((k - 1) * (j - 1), wp) / real(n, wp)
+                x_hat(k) = x_hat(k) + x(j) * cmplx(cos(theta), sin(theta), wp)
+            end do
+        end do
+    end subroutine simple_fft_forward_complex
+    
     !> Simple DFT backward transform (placeholder for FFTW)
     subroutine simple_fft_backward(x_hat, x)
         complex(wp), intent(in) :: x_hat(:)
@@ -371,14 +393,19 @@ contains
         ny = size(x, 2)
         allocate(temp(nx, ny))
         
-        ! Transform rows
+        ! Transform rows (real → complex)
         do i = 1, ny
             call simple_fft_forward(x(:, i), temp(:, i))
         end do
         
-        ! Transform columns
+        ! Transform columns (complex → complex).
+        ! FIX: the previous code called
+        !   call simple_fft_forward(real(temp(i, :), wp), x_hat(i, :))
+        ! which discarded the imaginary part of the row-transformed data —
+        ! a mathematically wrong 2D FFT. We now use the complex-to-complex
+        ! variant so both real and imaginary parts propagate.
         do i = 1, nx
-            call simple_fft_forward(real(temp(i, :), wp), x_hat(i, :))
+            call simple_fft_forward_complex(temp(i, :), x_hat(i, :))
         end do
         
         deallocate(temp)

@@ -13,7 +13,7 @@ if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS_RELEASE "-Ofast -march=native -mtune=native -flto -ffpe-summary=none -fopenmp")
     set(CMAKE_Fortran_FLAGS_PROFILING "-O3 -g -pg -fopenmp")
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -stand f08 -implicitnone -warn all -ffree-line-length-none")
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -stand f08 -implicitnone -warn all -extend-source")
     set(CMAKE_Fortran_FLAGS_DEBUG "-g -check all -traceback")
     set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -xHost")
 endif()
@@ -83,12 +83,58 @@ else()
     message(STATUS "OpenGL support disabled by user")
 endif()
 
+# ─────────────────────────────────────────────────────────────────────
+# CUDA Fortran acceleration (optional, requires NVIDIA HPC SDK / nvfortran).
+# When ON, builds the nuclear_physics_cuda library from .cuf files and
+# links it into bwr_core_simulator_opengl. When OFF (default), the build
+# proceeds exactly as today (gfortran + OpenMP + OpenBLAS).
+# ─────────────────────────────────────────────────────────────────────
+option(BUILD_WITH_CUDA "Build CUDA Fortran acceleration kernels (requires NVIDIA HPC SDK)" OFF)
+
+if(BUILD_WITH_CUDA)
+    # Require nvfortran. The HPC SDK ships nvfortran; users typically add
+    # it to PATH or set CMAKE_Fortran_COMPILER explicitly.
+    find_program(NVFORTRAN_EXECUTABLE nvfortran)
+    if(NOT NVFORTRAN_EXECUTABLE)
+        message(FATAL_ERROR
+            "BUILD_WITH_CUDA=ON but nvfortran not found. Install the NVIDIA "
+            "HPC SDK (https://developer.nvidia.com/hpc-sdk) and ensure "
+            "nvfortran is on PATH, or set -DCMAKE_Fortran_COMPILER=/path/to/nvfortran.")
+    endif()
+
+    # If the user did not already force the Fortran compiler, switch to nvfortran.
+    if(NOT CMAKE_Fortran_COMPILER)
+        set(CMAKE_Fortran_COMPILER ${NVFORTRAN_EXECUTABLE})
+    endif()
+
+    # nvfortran-specific flags. -cuda enables CUDA Fortran syntax.
+    # -O2 keeps FP semantics stable; switch to -O3 / -fast after correctness
+    # validation. -Mbackslash keeps backslash as a literal char (matches
+    # gfortran's default).
+    set(CMAKE_Fortran_FLAGS         "${CMAKE_Fortran_FLAGS} -std=f2008 -cuda -Mbackslash")
+    set(CMAKE_Fortran_FLAGS_RELEASE "-O2 -fast")
+    set(CMAKE_Fortran_FLAGS_DEBUG   "-O0 -g -C -traceback -Kcheck")
+
+    # Tell CMake to treat .cuf as Fortran source so the nvfortran driver
+    # picks them up.
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.cuf
+        PROPERTIES LANGUAGE Fortran)
+
+    add_subdirectory(cuda)
+
+    message(STATUS "CUDA Fortran acceleration: ENABLED (nvfortran: ${NVFORTRAN_EXECUTABLE})")
+else()
+    message(STATUS "CUDA Fortran acceleration: disabled (set -DBUILD_WITH_CUDA=ON to enable)")
+endif()
+
 # Core library
 add_subdirectory(core)
 
 # Kernel library (depends on core)
 add_subdirectory(kernels)
-target_link_libraries(nuclear_physics_kernels nuclear_physics_core ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+# Link core into kernels. LAPACK/BLAS are linked inside kernels/CMakeLists.txt
+# (the kernels library calls dgesv directly in backward_euler.f90 and eigen.f90).
+target_link_libraries(nuclear_physics_kernels PUBLIC nuclear_physics_core)
 
 add_subdirectory(tests)
 add_subdirectory(models)
@@ -118,6 +164,15 @@ if(OPENGL_AVAILABLE)
         ${BLAS_LIBRARIES}
         ${OPENGL_LIBRARIES}
         ${GLUT_LIBRARIES})
+
+    # When CUDA is enabled, link the GPU acceleration library and pull in
+    # the cudafor module + libcudaclient runtime (nvfortran links this
+    # automatically when it sees -cuda on the link line).
+    if(BUILD_WITH_CUDA)
+        target_link_libraries(bwr_core_simulator_opengl nuclear_physics_cuda)
+        target_compile_definitions(bwr_core_simulator_opengl PRIVATE USE_CUDA)
+        target_link_options(bwr_core_simulator_opengl PRIVATE -cuda)
+    endif()
     
     target_include_directories(bwr_core_simulator_opengl PRIVATE 
         include
@@ -172,12 +227,18 @@ message(STATUS "    - nuclear_physics_kernels")
 message(STATUS "    - nuclear_physics_models")
 message(STATUS "    - nuclear_physics_subsystems")
 message(STATUS "    - nuclear_physics_c (C interface)")
+if(BUILD_WITH_CUDA)
+    message(STATUS "    - nuclear_physics_cuda (CUDA Fortran acceleration)")
+endif()
 message(STATUS "")
 message(STATUS "  Examples:")
 if(OPENGL_AVAILABLE)
     message(STATUS "    - bwr_core_simulator_opengl (3D visualisation)")
 else()
     message(STATUS "    - bwr_core_simulator_opengl (not available - missing OpenGL/GLUT)")
+endif()
+if(BUILD_WITH_CUDA)
+    message(STATUS "    - bwr_core_simulator_opengl links nuclear_physics_cuda (GPU acceleration)")
 endif()
 message(STATUS "═════════════════════════════════════════════════════")
 message(STATUS "")

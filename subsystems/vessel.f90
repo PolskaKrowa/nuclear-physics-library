@@ -219,10 +219,13 @@ contains
         real(wp), parameter :: RHO_REF = 1000.0_wp  ! reference density used by calc_reactor_level
 
         ! Coolant temperature smoothing (3-tap rolling average).
-        state%coolant_T_prev2 = state%coolant_T_prev1
-        state%coolant_T_prev1 = drivers%avg_coolant_temp_K
+        ! Compute the average BEFORE advancing the history buffers,
+        ! otherwise prev1 collapses to the current value and the
+        ! average degenerates to (2*current + old_prev1)/3.
         T_mean_smooth = (drivers%avg_coolant_temp_K &
                         + state%coolant_T_prev1 + state%coolant_T_prev2) / 3.0_wp
+        state%coolant_T_prev2 = state%coolant_T_prev1
+        state%coolant_T_prev1 = drivers%avg_coolant_temp_K
 
         T_sat = sat_temp_K(state%pressure_operating)
         state%sat_temperature = T_sat

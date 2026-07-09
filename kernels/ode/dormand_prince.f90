@@ -189,7 +189,8 @@ contains
             end if
             
             ! Take one DOPRI step and compute error
-            call dopri_step(func, t, y, dt, y_new, error_norm)
+            call dopri_step(func, t, y, dt, y_new, error_norm, &
+                            config%atol, config%rtol)
             
             status%steps_taken = step
             status%func_evals = status%func_evals + 7
@@ -269,14 +270,18 @@ contains
         deallocate(t_temp, y_temp)
     end subroutine dopri_solve
     
-    !> Perform single DOPRI5 step with error estimation
-    pure subroutine dopri_step(func, t, y, dt, y_new, error_norm)
+    !> Perform single DOPRI5 step with error estimation.
+    !! Uses the caller-supplied atol/rtol to compute a mixed
+    !! relative/absolute error scale. (Previously hardcoded
+    !! 1e-8 + 1e-6*scale — user tolerances were silently ignored.)
+    pure subroutine dopri_step(func, t, y, dt, y_new, error_norm, atol, rtol)
         procedure(ode_func_interface) :: func
         real(wp), intent(in) :: t
         real(wp), intent(in) :: y(:)
         real(wp), intent(in) :: dt
         real(wp), intent(out) :: y_new(:)
         real(wp), intent(out) :: error_norm
+        real(wp), intent(in) :: atol, rtol
         
         real(wp) :: k1(size(y)), k2(size(y)), k3(size(y)), k4(size(y))
         real(wp) :: k5(size(y)), k6(size(y)), k7(size(y))
@@ -314,9 +319,11 @@ contains
         ! Error estimate (difference between 5th and 4th order)
         error = dt * (E1 * k1 + E3 * k3 + E4 * k4 + E5 * k5 + E6 * k6 + E7 * k7)
         
-        ! Compute error norm with mixed relative/absolute tolerance
-        scale = max(abs(y), abs(y_new))
-        error_norm = sqrt(sum((error / (1.0e-8_wp + 1.0e-6_wp * scale))**2) / size(y))
+        ! Compute error norm with user-specified mixed relative/absolute
+        ! tolerance. (Previous code hardcoded 1e-8 + 1e-6*scale, ignoring
+        ! config%atol/rtol.)
+        scale = atol + rtol * max(abs(y), abs(y_new))
+        error_norm = sqrt(sum((error / scale)**2) / real(size(y), wp))
     end subroutine dopri_step
     
     !> Estimate good initial step size

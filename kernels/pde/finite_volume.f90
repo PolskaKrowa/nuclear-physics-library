@@ -37,8 +37,31 @@ module finite_volume
     public :: fv_compute_fluxes_2d
     public :: fv_reconstruct
     public :: fv_apply_limiter
+    public :: fv_set_lax_wendroff_dt_over_dx
+    
+    ! Module-level cache for dt/dx used by the Lax-Wendroff dissipation
+    ! term. Defaults to 1.0 (the previous buggy behaviour) for backward
+    ! compatibility. Callers that know dt and dx should call
+    ! fv_set_lax_wendroff_dt_over_dx(dt/dx) before invoking
+    ! fv_compute_fluxes_1d with FV_LAX_WENDROFF.
+    real(wp), save :: dt_over_dx_cache = 1.0_wp
     
 contains
+
+    !> Set the dt/dx ratio used by the Lax-Wendroff dissipation term.
+    !! Call this before invoking fv_compute_fluxes_1d with FV_LAX_WENDROFF
+    !! so the dissipation term `velocity**2 * dt/dx * (u(i) - u(i-1)) / 2`
+    !! has the correct magnitude. Without this call, the cache defaults
+    !! to 1.0 (the previous buggy behaviour — unstable for any non-trivial
+    !! dt, but at least doesn't crash existing callers).
+    subroutine fv_set_lax_wendroff_dt_over_dx(dt, dx)
+        real(wp), intent(in) :: dt, dx
+        if (dx > TOL_DEFAULT) then
+            dt_over_dx_cache = dt / dx
+        else
+            dt_over_dx_cache = 1.0_wp
+        end if
+    end subroutine fv_set_lax_wendroff_dt_over_dx
 
     !> 1D advection using finite volume method
     !! Solves ∂u/∂t + a·∂u/∂x = 0
@@ -253,13 +276,19 @@ contains
             flux(n + 1) = flux(1)
             
         case(FV_LAX_WENDROFF)
-            ! Lax-Wendroff (second-order)
+            ! Lax-Wendroff (second-order). The dissipation term must be
+            ! scaled by dt/dx — without it the scheme is unstable for any
+            ! non-trivial dt and produces wrong physics. We pass dt and dx
+            ! via the module-level dt_over_dx_cache set by the caller; if
+            ! not set, fall back to assuming dt/dx = 1 (the previous buggy
+            ! behaviour) so existing callers that didn't update still get
+            ! the old answer rather than a crash.
             do i = 2, n
                 flux(i) = velocity * (u(i - 1) + u(i)) / 2.0_wp - &
-                          velocity**2 * (u(i) - u(i - 1)) / 2.0_wp
+                          velocity**2 * dt_over_dx_cache * (u(i) - u(i - 1)) / 2.0_wp
             end do
             flux(1) = velocity * (u(n) + u(1)) / 2.0_wp - &
-                      velocity**2 * (u(1) - u(n)) / 2.0_wp
+                      velocity**2 * dt_over_dx_cache * (u(1) - u(n)) / 2.0_wp
             flux(n + 1) = flux(1)
             
         case default

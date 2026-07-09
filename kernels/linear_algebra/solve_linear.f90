@@ -159,8 +159,9 @@ contains
         end if
     end subroutine solve_symmetric
     
-    !> Solve tridiagonal system using Thomas algorithm
-    !! More efficient than general solver for tridiagonal matrices
+    !> Solve tridiagonal system using Thomas algorithm.
+    !! More efficient than general solver for tridiagonal matrices.
+    !! On any error return, `x` is zeroed so callers never read garbage.
     pure subroutine solve_tridiagonal(a, b, c, d, x, status)
         real(wp), intent(in) :: a(:)   ! Lower diagonal (size n-1)
         real(wp), intent(in) :: b(:)   ! Main diagonal (size n)
@@ -169,19 +170,42 @@ contains
         real(wp), intent(out) :: x(:)  ! Solution (size n)
         integer(i32), intent(out), optional :: status
         
-        real(wp) :: cp(size(b) - 1), dp(size(b))
+        real(wp) :: cp(max(0, size(b) - 1)), dp(size(b))
         real(wp) :: m
         integer :: n, i
         
         n = size(b)
         
-        if (size(a) /= n - 1 .or. size(c) /= n - 1 .or. &
+        ! Always start from a clean x so error-path callers see zeros.
+        x = 0.0_wp
+        
+        if (n < 1) then
+            if (present(status)) status = SOLVE_ERR_INVALID_SIZE
+            return
+        end if
+        
+        if (size(a) /= max(0, n - 1) .or. size(c) /= max(0, n - 1) .or. &
             size(d) /= n .or. size(x) /= n) then
             if (present(status)) status = SOLVE_ERR_INVALID_SIZE
             return
         end if
         
+        ! n = 1 short-circuit: no off-diagonals to eliminate.
+        if (n == 1) then
+            if (abs(b(1)) < TOL_DEFAULT) then
+                if (present(status)) status = SOLVE_ERR_SINGULAR
+                return
+            end if
+            x(1) = d(1) / b(1)
+            if (present(status)) status = SOLVE_SUCCESS
+            return
+        end if
+        
         ! Forward sweep
+        if (abs(b(1)) < TOL_DEFAULT) then
+            if (present(status)) status = SOLVE_ERR_SINGULAR
+            return
+        end if
         cp(1) = c(1) / b(1)
         dp(1) = d(1) / b(1)
         

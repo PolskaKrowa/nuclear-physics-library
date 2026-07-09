@@ -412,13 +412,58 @@ contains
             end do
         end do
         
-        ! Boundaries set to zero (simplified)
-        laplacian(1, :, :) = 0.0_wp
-        laplacian(nx, :, :) = 0.0_wp
-        laplacian(:, 1, :) = 0.0_wp
-        laplacian(:, ny, :) = 0.0_wp
-        laplacian(:, :, 1) = 0.0_wp
-        laplacian(:, :, nz) = 0.0_wp
+        ! Boundary points: one-sided second derivative.
+        ! The previous code set ALL boundary values to 0 ("simplified"),
+        ! which eliminated diffusion at every boundary cell and corrupted
+        ! PDE dynamics. We now use the one-sided 3-point stencil:
+        !   f''(x_1) ≈ (2*f_1 - 5*f_2 + 4*f_3 - f_4) / dx²
+        ! which is O(dx²) accurate and preserves the diffusion operator
+        ! at the boundary.
+        
+        ! X faces (i=1 and i=nx)
+        if (nx >= 4) then
+            do k = 1, nz
+                do j = 1, ny
+                    laplacian(1, j, k)  = (2.0_wp*u(1,j,k) - 5.0_wp*u(2,j,k) + &
+                        4.0_wp*u(3,j,k) - u(4,j,k)) * inv_dx2
+                    laplacian(nx, j, k) = (2.0_wp*u(nx,j,k) - 5.0_wp*u(nx-1,j,k) + &
+                        4.0_wp*u(nx-2,j,k) - u(nx-3,j,k)) * inv_dx2
+                end do
+            end do
+        else
+            laplacian(1, :, :)  = 0.0_wp
+            laplacian(nx, :, :) = 0.0_wp
+        end if
+        
+        ! Y faces (j=1 and j=ny)
+        if (ny >= 4) then
+            do k = 1, nz
+                do i = 1, nx
+                    laplacian(i, 1, k)  = (2.0_wp*u(i,1,k) - 5.0_wp*u(i,2,k) + &
+                        4.0_wp*u(i,3,k) - u(i,4,k)) * inv_dy2
+                    laplacian(i, ny, k) = (2.0_wp*u(i,ny,k) - 5.0_wp*u(i,ny-1,k) + &
+                        4.0_wp*u(i,ny-2,k) - u(i,ny-3,k)) * inv_dy2
+                end do
+            end do
+        else
+            laplacian(:, 1, :)  = 0.0_wp
+            laplacian(:, ny, :) = 0.0_wp
+        end if
+        
+        ! Z faces (k=1 and k=nz)
+        if (nz >= 4) then
+            do j = 1, ny
+                do i = 1, nx
+                    laplacian(i, j, 1)  = (2.0_wp*u(i,j,1) - 5.0_wp*u(i,j,2) + &
+                        4.0_wp*u(i,j,3) - u(i,j,4)) * inv_dz2
+                    laplacian(i, j, nz) = (2.0_wp*u(i,j,nz) - 5.0_wp*u(i,j,nz-1) + &
+                        4.0_wp*u(i,j,nz-2) - u(i,j,nz-3)) * inv_dz2
+                end do
+            end do
+        else
+            laplacian(:, :, 1)  = 0.0_wp
+            laplacian(:, :, nz) = 0.0_wp
+        end if
     end subroutine fd_laplacian_3d
     
     !> Compute 2D gradient: (∂u/∂x, ∂u/∂y)

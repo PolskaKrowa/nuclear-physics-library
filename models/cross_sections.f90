@@ -262,7 +262,7 @@ contains
         real(wp), intent(in), optional :: alpha_D(:)
         
         integer :: g
-        real(wp) :: delta_T, factor, alpha_doppler
+        real(wp) :: delta_T, factor, alpha_doppler, nu_g
         
         delta_T = T_fuel - T_ref
 
@@ -297,11 +297,29 @@ contains
                 if (g <= size(alpha_D)) alpha_doppler = alpha_D(g)
             end if
 
+            ! Preserve per-group nu (2.50 fast / 2.42 thermal) instead of
+            ! overwriting with the uniform 2.43. The previous code did
+            !   xsec%nu_sigma_f(g) = xsec%sigma_f(g) * 2.43_wp
+            ! after modifying sigma_f, which destroyed the group-dependent
+            ! neutron multiplicity and biased k_eff.
+            if (xsec%sigma_f(g) > TOL_DEFAULT) then
+                nu_g = xsec%nu_sigma_f(g) / xsec%sigma_f(g)
+            else
+                ! Default per-group nu when sigma_f is zero (no fission
+                ! in this group anyway, so the value is moot but should
+                ! still be group-appropriate for downstream sanity checks).
+                if (g == 1) then
+                    nu_g = 2.50_wp
+                else
+                    nu_g = 2.42_wp
+                end if
+            end if
+
             xsec%sigma_a(g) = xsec%sigma_a(g) * factor * (1.0_wp + alpha_doppler * delta_T / 1.0e5_wp)
             
             ! Resonance fission also affected
             xsec%sigma_f(g) = xsec%sigma_f(g) * (1.0_wp + 0.5_wp * alpha_doppler * delta_T / 1.0e5_wp)
-            xsec%nu_sigma_f(g) = xsec%sigma_f(g) * 2.43_wp
+            xsec%nu_sigma_f(g) = xsec%sigma_f(g) * nu_g
         end do
         
         ! Update removal
@@ -405,9 +423,15 @@ contains
         real(wp) :: delta_sigma_a_fast, delta_sigma_a_thermal
         
         ! Macroscopic worth constants [cm^-1]
-        ! These are "black" absorbers relative to fuel
-        delta_sigma_a_fast    = 0.08_wp   ! Small effect in fast group
-        delta_sigma_a_thermal = 8.0_wp   ! Massive effect in thermal group
+        ! A realistic BWR B4C control blade, homogenized over the assembly,
+        ! has a thermal absorption worth of roughly 0.05-0.30 cm^-1 depending
+        ! on blade thickness and enrichment. The previous value of 8.0 cm^-1
+        ! was ~40× too high: combined with 95% rod insertion it drove k_eff
+        ! to 0.015 (a deeply subcritical reactor that should be ~0.9-0.95 at
+        ! full insertion). Reduced to 0.20 cm^-1 which gives a realistic
+        ! rod worth of ~5-10% Δk/k for full insertion.
+        delta_sigma_a_fast    = 0.02_wp   ! Small effect in fast group
+        delta_sigma_a_thermal = 0.20_wp   ! Realistic homogenized blade worth
 
         ! Linearly weight by how much rod is in this specific node
         if (rod_fraction > 0.0_wp) then

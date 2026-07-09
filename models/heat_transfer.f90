@@ -520,66 +520,163 @@ contains
         deallocate(alpha, a_diag, b_diag, c_diag, rhs, sol)
     end subroutine heat_step_implicit
     
-    !> Apply boundary conditions
+    !> Apply boundary conditions on all 6 faces.
+    !! The previous implementation only handled -x and +x; the y and z
+    !! faces were silently skipped (the comment said "omitted for brevity"),
+    !! which corrupted PDE dynamics for any non-adiabatic y/z BC.
     subroutine heat_apply_bc(state)
         type(heat_state_t), intent(inout) :: state
-        integer :: i, j, k, face
-        real(wp) :: T_bc, flux, htc, T_amb, T_surf
+        integer :: i, j, k, face, nx, ny, nz
+        real(wp) :: T_bc, flux, htc, T_amb, T_surf, k_therm
         
-        ! -x face (i=1)
+        nx = state%nx;  ny = state%ny;  nz = state%nz
+        
+        ! ---- -x face (i=1) ----
         face = 1
         select case(state%config%bc_type(face))
         case(BC_DIRICHLET)
             state%T(1, :, :) = state%config%bc_value(face)
         case(BC_NEUMANN)
-            ! Flux specified: q = -k·dT/dx
             flux = state%config%bc_value(face)
-            do k = 1, state%nz
-                do j = 1, state%ny
-                    state%T(1, j, k) = state%T(2, j, k) - flux * state%dx / &
-                        state%material(1, j, k)%thermal_conductivity
-                end do
-            end do
+            do k = 1, nz; do j = 1, ny
+                state%T(1, j, k) = state%T(2, j, k) - flux * state%dx / &
+                    state%material(1, j, k)%thermal_conductivity
+            end do; end do
         case(BC_CONVECTIVE)
-            ! Newton's law of cooling: q = h(T_surf - T_amb)
-            htc = state%config%htc(face)
-            T_amb = state%config%t_ambient(face)
-            do k = 1, state%nz
-                do j = 1, state%ny
-                    ! Implicit update for stability
-                    T_surf = (state%material(1, j, k)%thermal_conductivity * &
-                             state%T(2, j, k) / state%dx + htc * T_amb) / &
-                            (state%material(1, j, k)%thermal_conductivity / &
-                             state%dx + htc)
-                    state%T(1, j, k) = T_surf
-                end do
-            end do
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do k = 1, nz; do j = 1, ny
+                k_therm = state%material(1, j, k)%thermal_conductivity
+                state%T(1, j, k) = (k_therm * state%T(2, j, k) / state%dx + htc * T_amb) / &
+                                   (k_therm / state%dx + htc)
+            end do; end do
         case(BC_ADIABATIC)
             state%T(1, :, :) = state%T(2, :, :)
         end select
         
-        ! +x face (i=nx) - similar logic
+        ! ---- +x face (i=nx) ----
         face = 2
         select case(state%config%bc_type(face))
         case(BC_DIRICHLET)
-            state%T(state%nx, :, :) = state%config%bc_value(face)
+            state%T(nx, :, :) = state%config%bc_value(face)
+        case(BC_NEUMANN)
+            flux = state%config%bc_value(face)
+            do k = 1, nz; do j = 1, ny
+                state%T(nx, j, k) = state%T(nx-1, j, k) + flux * state%dx / &
+                    state%material(nx, j, k)%thermal_conductivity
+            end do; end do
+        case(BC_CONVECTIVE)
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do k = 1, nz; do j = 1, ny
+                k_therm = state%material(nx, j, k)%thermal_conductivity
+                state%T(nx, j, k) = (k_therm * state%T(nx-1, j, k) / state%dx + htc * T_amb) / &
+                                    (k_therm / state%dx + htc)
+            end do; end do
         case(BC_ADIABATIC)
-            state%T(state%nx, :, :) = state%T(state%nx - 1, :, :)
+            state%T(nx, :, :) = state%T(nx-1, :, :)
         end select
         
-        ! Similar for other faces...
-        ! (Implementation omitted for brevity - follow same pattern)
+        ! ---- -y face (j=1) ----
+        face = 3
+        select case(state%config%bc_type(face))
+        case(BC_DIRICHLET)
+            state%T(:, 1, :) = state%config%bc_value(face)
+        case(BC_NEUMANN)
+            flux = state%config%bc_value(face)
+            do k = 1, nz; do i = 1, nx
+                state%T(i, 1, k) = state%T(i, 2, k) - flux * state%dy / &
+                    state%material(i, 1, k)%thermal_conductivity
+            end do; end do
+        case(BC_CONVECTIVE)
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do k = 1, nz; do i = 1, nx
+                k_therm = state%material(i, 1, k)%thermal_conductivity
+                state%T(i, 1, k) = (k_therm * state%T(i, 2, k) / state%dy + htc * T_amb) / &
+                                   (k_therm / state%dy + htc)
+            end do; end do
+        case(BC_ADIABATIC)
+            state%T(:, 1, :) = state%T(:, 2, :)
+        end select
+        
+        ! ---- +y face (j=ny) ----
+        face = 4
+        select case(state%config%bc_type(face))
+        case(BC_DIRICHLET)
+            state%T(:, ny, :) = state%config%bc_value(face)
+        case(BC_NEUMANN)
+            flux = state%config%bc_value(face)
+            do k = 1, nz; do i = 1, nx
+                state%T(i, ny, k) = state%T(i, ny-1, k) + flux * state%dy / &
+                    state%material(i, ny, k)%thermal_conductivity
+            end do; end do
+        case(BC_CONVECTIVE)
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do k = 1, nz; do i = 1, nx
+                k_therm = state%material(i, ny, k)%thermal_conductivity
+                state%T(i, ny, k) = (k_therm * state%T(i, ny-1, k) / state%dy + htc * T_amb) / &
+                                    (k_therm / state%dy + htc)
+            end do; end do
+        case(BC_ADIABATIC)
+            state%T(:, ny, :) = state%T(:, ny-1, :)
+        end select
+        
+        ! ---- -z face (k=1) ----
+        face = 5
+        select case(state%config%bc_type(face))
+        case(BC_DIRICHLET)
+            state%T(:, :, 1) = state%config%bc_value(face)
+        case(BC_NEUMANN)
+            flux = state%config%bc_value(face)
+            do j = 1, ny; do i = 1, nx
+                state%T(i, j, 1) = state%T(i, j, 2) - flux * state%dz / &
+                    state%material(i, j, 1)%thermal_conductivity
+            end do; end do
+        case(BC_CONVECTIVE)
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do j = 1, ny; do i = 1, nx
+                k_therm = state%material(i, j, 1)%thermal_conductivity
+                state%T(i, j, 1) = (k_therm * state%T(i, j, 2) / state%dz + htc * T_amb) / &
+                                   (k_therm / state%dz + htc)
+            end do; end do
+        case(BC_ADIABATIC)
+            state%T(:, :, 1) = state%T(:, :, 2)
+        end select
+        
+        ! ---- +z face (k=nz) ----
+        face = 6
+        select case(state%config%bc_type(face))
+        case(BC_DIRICHLET)
+            state%T(:, :, nz) = state%config%bc_value(face)
+        case(BC_NEUMANN)
+            flux = state%config%bc_value(face)
+            do j = 1, ny; do i = 1, nx
+                state%T(i, j, nz) = state%T(i, j, nz-1) + flux * state%dz / &
+                    state%material(i, j, nz)%thermal_conductivity
+            end do; end do
+        case(BC_CONVECTIVE)
+            htc = state%config%htc(face);  T_amb = state%config%t_ambient(face)
+            do j = 1, ny; do i = 1, nx
+                k_therm = state%material(i, j, nz)%thermal_conductivity
+                state%T(i, j, nz) = (k_therm * state%T(i, j, nz-1) / state%dz + htc * T_amb) / &
+                                    (k_therm / state%dz + htc)
+            end do; end do
+        case(BC_ADIABATIC)
+            state%T(:, :, nz) = state%T(:, :, nz-1)
+        end select
     end subroutine heat_apply_bc
     
-    !> Get maximum stable time step
+    !> Get maximum stable time step.
+    !! Guards against division by zero when all velocities are zero
+    !! (the previous code unconditionally divided by
+    !! maxval(abs(vx)+abs(vy)+abs(vz)) which is 0 in pure-conduction mode).
     function heat_get_max_dt(state) result(dt_max)
         type(heat_state_t), intent(in) :: state
         real(wp) :: dt_max
         
-        real(wp) :: alpha_max, dx_min, cfl
+        real(wp) :: alpha_max, dx_min, cfl, v_max
         
-        ! Find maximum thermal diffusivity
+        ! Find maximum thermal diffusivity (guard against zero)
         alpha_max = maxval(state%material(:, :, :)%thermal_diffusivity)
+        if (alpha_max < TOL_DEFAULT) alpha_max = TOL_DEFAULT
         
         ! Find minimum grid spacing
         dx_min = min(state%dx, state%dy, state%dz)
@@ -589,10 +686,13 @@ contains
         cfl = 0.25_wp  ! Safety factor
         dt_max = cfl * dx_min**2 / (3.0_wp * alpha_max)
         
-        ! Account for convection if present
+        ! Account for convection if present — guard against zero velocity
+        ! (e.g. pure-conduction standby mode where vx=vy=vz=0).
         if (state%config%include_convection) then
-            dt_max = min(dt_max, 0.5_wp * dx_min / &
-                maxval(abs(state%vx) + abs(state%vy) + abs(state%vz)))
+            v_max = maxval(abs(state%vx) + abs(state%vy) + abs(state%vz))
+            if (v_max > TOL_DEFAULT) then
+                dt_max = min(dt_max, 0.5_wp * dx_min / v_max)
+            end if
         end if
     end function heat_get_max_dt
     

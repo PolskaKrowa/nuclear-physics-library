@@ -80,8 +80,9 @@ contains
         type(rk4_status_t), intent(out) :: status
         
         real(wp) :: t, tf, dt
-        real(wp) :: y(size(y0))
+        real(wp) :: y(size(y0)), y_new(size(y0))
         integer :: n, step, max_outputs, output_idx
+        logical :: reached_final
         
         ! Initialize
         n = size(y0)
@@ -114,14 +115,16 @@ contains
         y_out(:, output_idx) = y
         
         ! Integration loop
+        reached_final = .false.
         do step = 1, config%max_steps
             ! Adjust final step if needed
             if (t + dt > tf) then
                 dt = tf - t
             end if
             
-            ! Take RK4 step
-            call rk4_step(func, t, y, dt, y)
+            ! Take RK4 step (use temp to avoid aliasing y as both in and out)
+            call rk4_step(func, t, y, dt, y_new)
+            y = y_new
             t = t + dt
             
             status%steps_taken = step
@@ -139,20 +142,25 @@ contains
             
             ! Check if we've reached the final time
             if (abs(t - tf) < epsilon(1.0_wp)) then
-                status%code = RK4_SUCCESS
+                reached_final = .true.
                 status%final_time = t
                 exit
             end if
         end do
         
-        ! Trim output arrays to actual size
+        ! Trim output arrays to actual size (guard against output_idx > max_outputs)
+        if (output_idx > max_outputs) output_idx = max_outputs
         if (output_idx < max_outputs) then
             t_out = t_out(1:output_idx)
             y_out = y_out(:, 1:output_idx)
         end if
         
-        ! Check if max steps exceeded
-        if (status%code /= RK4_SUCCESS) then
+        ! Check if max steps exceeded (status%code defaults to SUCCESS, so use
+        ! an explicit reached_final flag — the previous code's
+        ! `if (status%code /= RK4_SUCCESS)` test was always false.)
+        if (reached_final) then
+            status%code = RK4_SUCCESS
+        else
             status%code = RK4_ERR_MAX_STEPS
             status%final_time = t
         end if

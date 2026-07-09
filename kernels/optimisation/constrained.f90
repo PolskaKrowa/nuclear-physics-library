@@ -330,13 +330,22 @@ contains
         grad_proj = grad
         
         do i = 1, size(x)
-            ! If at lower bound and gradient points downward, project to zero
-            if (abs(x(i) - lower(i)) < active_tol .and. grad(i) < 0.0_wp) then
+            ! At lower bound, we can only move in the +x direction.
+            ! Gradient descent moves in the -grad direction. So:
+            !   - grad > 0  →  descent direction is -x  (blocked by bound)
+            !   - grad < 0  →  descent direction is +x  (allowed)
+            ! Project the gradient to zero when the descent direction is
+            ! blocked. (Previous code had the conditions inverted, which
+            ! projected the wrong cases to zero and pushed the optimiser
+            ! into the constraints instead of along them.)
+            if (abs(x(i) - lower(i)) < active_tol .and. grad(i) > 0.0_wp) then
                 grad_proj(i) = 0.0_wp
             end if
             
-            ! If at upper bound and gradient points upward, project to zero
-            if (abs(x(i) - upper(i)) < active_tol .and. grad(i) > 0.0_wp) then
+            ! At upper bound, we can only move in the -x direction.
+            !   - grad < 0  →  descent direction is +x  (blocked by bound)
+            !   - grad > 0  →  descent direction is -x  (allowed)
+            if (abs(x(i) - upper(i)) < active_tol .and. grad(i) < 0.0_wp) then
                 grad_proj(i) = 0.0_wp
             end if
         end do

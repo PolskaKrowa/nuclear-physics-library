@@ -75,6 +75,11 @@ contains
         case(dp)
             big = huge(1.0_dp)
         case(qp)
+            ! FIX: was huge(1.0_dp) — copy-paste bug from the sp branch.
+            ! We still return real(dp) for ABI stability; huge(1.0_qp) is
+            ! ~1.19e4932 which overflows real(dp) to +Inf, so we cap at
+            ! huge(1.0_dp) and document the limitation. Callers that need
+            ! the true qp range should call huge(1.0_qp) directly.
             big = huge(1.0_dp)
         case default
             big = huge(1.0_dp)

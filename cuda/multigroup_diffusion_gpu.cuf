@@ -1,0 +1,373 @@
+! cuda/multigroup_diffusion_gpu.cuf
+!
+! CUDA Fortran acceleration of the multigroup diffusion inner iteration.
+!
+! Implements one Jacobi sweep of the 7-point diffusion stencil:
+!
+!   phi_new(i,j,k,g) = RELAX * rhs/denom + (1-RELAX) * phi(i,j,k,g)
+!
+!   rhs = D * ( inv_dx2*(phi_xm + phi_xp) + inv_dy2*(phi_ym + phi_yp)
+!             + inv_dz2*(phi_zm + phi_zp) )
+!         + inscatter + fission_source + external_source
+!
+!   denom = 2*D*(inv_dx2 + inv_dy2 + inv_dz2) + sigma_r
+!
+! This mirrors solve_group_equation_safe in multigroup_diffusion.f90 but
+! uses a separate flux_new buffer (no in-place race) and runs entirely on
+! the GPU via managed memory. The host code can read/write the arrays
+! directly (managed memory handles migration); no explicit cuda_memcpy is
+! needed for normal use, but copy_to_device / copy_from_device are provided
+! for the cases where explicit sync is required (e.g. before a cuSOLVER call).
+!
+! Build (standalone):
+!   nvfortran -cuda -O3 multigroup_diffusion_gpu.cuf
+!
+! Build (CMake):
+!   cmake -DBUILD_WITH_CUDA=ON -DCMAKE_Fortran_COMPILER=nvfortran ..
+!   make -j$(nproc)
+!
+! Integration: the host calls init_gpu once after mg_init, then
+! copy_to_device whenever cross-sections change (after
+! update_cross_sections_feedback). The inner loop in mg_solve_eigenvalue
+! replaces `call solve_group_equation_safe(state, g)` with
+! `call source_iteration_step_gpu(gpu_state, g)`. After the eigenvalue
+! solve, call copy_from_device to retrieve the converged flux into
+! state%flux so that normalize_flux and compute_power_distribution work
+! unchanged.
+!
+! NOTE: keep wp = real64 (matches kinds.f90). All device arrays use the
+! same kind as the host mg_state_t fields so the wrappers can copy data
+! with a plain array assignment (managed memory makes this trivial).
+
+module multigroup_diffusion_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    implicit none
+    private
+
+    public :: mg_gpu_state_t
+    public :: mg_gpu_init, mg_gpu_cleanup
+    public :: mg_gpu_copy_to_device, mg_gpu_copy_from_device
+    public :: mg_gpu_source_iteration_step
+    public :: mg_gpu_apply_boundary_conditions
+    public :: mg_gpu_set_albedos
+
+    ! Mirror of the relaxation/clamp constants in multigroup_diffusion.f90.
+    ! Kept here as parameters so the kernel can inline them.
+    real(wp), parameter :: RELAX           = 0.8_wp
+    real(wp), parameter :: ONE_MINUS_RELAX = 0.2_wp
+    real(wp), parameter :: MIN_DENOM       = 1.0e-10_wp
+    real(wp), parameter :: MAX_FLUX        = 1.0e15_wp
+
+    !> GPU-side state container. Mirrors the field subset of mg_state_t
+    !! that the Jacobi sweep touches. All arrays are managed so the host
+    !! can read and write them directly without explicit H2D/D2H copies.
+    type :: mg_gpu_state_t
+        integer :: nx, ny, nz, ng
+        real(wp) :: dx, dy, dz
+        real(wp) :: inv_dx2, inv_dy2, inv_dz2
+        real(wp) :: k_eff_inv          ! 1 / max(k_eff, 0.005)
+
+        ! Per-cell cross-section fields, flattened from mg_xsec_t.
+        ! Layout (nx,ny,nz,ng) matches the host's flux layout so the kernel
+        ! memory access pattern is coalesced (x is the fastest index).
+        real(wp), allocatable, managed :: flux(:,:,:,:)          ! (nx,ny,nz,ng)
+        real(wp), allocatable, managed :: flux_new(:,:,:,:)      ! (nx,ny,nz,ng)
+        real(wp), allocatable, managed :: fission_src(:,:,:)     ! (nx,ny,nz)
+        real(wp), allocatable, managed :: D(:,:,:,:)             ! (nx,ny,nz,ng)
+        real(wp), allocatable, managed :: sigma_r(:,:,:,:)       ! (nx,ny,nz,ng)
+        real(wp), allocatable, managed :: sigma_s(:,:,:,:,:)     ! (ng,ng,nx,ny,nz)
+        real(wp), allocatable, managed :: chi(:,:,:,:)           ! (nx,ny,nz,ng)
+        real(wp), allocatable, managed :: external_src(:,:,:,:)  ! (nx,ny,nz,ng)
+
+        ! Boundary albedos (replicated from mg_config_t).
+        real(wp) :: albedo_x_min, albedo_x_max
+        real(wp) :: albedo_y_min, albedo_y_max
+        real(wp) :: albedo_z_min, albedo_z_max
+
+        ! Last CUDA status (for diagnostics).
+        integer :: cuda_status = 0
+    end type mg_gpu_state_t
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Lifecycle
+    ! -----------------------------------------------------------------
+
+    !> Allocate device-side arrays. Call once after mg_init has set
+    !! nx,ny,nz,ng. With managed memory the allocation is visible from
+    !! both host and device; the runtime migrates pages on demand.
+    subroutine mg_gpu_init(g, nx, ny, nz, ng, dx, dy, dz, k_eff)
+        type(mg_gpu_state_t), intent(out) :: g
+        integer,  intent(in) :: nx, ny, nz, ng
+        real(wp), intent(in) :: dx, dy, dz, k_eff
+        integer :: istat
+
+        g%nx = nx;  g%ny = ny;  g%nz = nz;  g%ng = ng
+        g%dx = dx;  g%dy = dy;  g%dz = dz
+        g%inv_dx2 = 1.0_wp / (dx * dx)
+        g%inv_dy2 = 1.0_wp / (dy * dy)
+        g%inv_dz2 = 1.0_wp / (dz * dz)
+        g%k_eff_inv = 1.0_wp / max(k_eff, 0.005_wp)
+
+        ! Managed allocations: accessible from both host and device.
+        allocate(g%flux(nx,ny,nz,ng),         stat=istat)
+        g%cuda_status = istat
+        if (istat /= 0) return
+        allocate(g%flux_new(nx,ny,nz,ng),     stat=istat)
+        allocate(g%fission_src(nx,ny,nz),     stat=istat)
+        allocate(g%D(nx,ny,nz,ng),            stat=istat)
+        allocate(g%sigma_r(nx,ny,nz,ng),      stat=istat)
+        allocate(g%sigma_s(ng,ng,nx,ny,nz),   stat=istat)
+        allocate(g%chi(nx,ny,nz,ng),          stat=istat)
+        allocate(g%external_src(nx,ny,nz,ng), stat=istat)
+        g%cuda_status = istat
+        if (istat /= 0) return
+
+        ! Initialise to zero to avoid NaN on first kernel launch.
+        g%flux         = 0.0_wp
+        g%flux_new     = 0.0_wp
+        g%fission_src  = 0.0_wp
+        g%D            = 0.0_wp
+        g%sigma_r      = 0.0_wp
+        g%sigma_s      = 0.0_wp
+        g%chi          = 0.0_wp
+        g%external_src = 0.0_wp
+
+        ! Default albedos (vacuum boundary). Override via mg_gpu_set_albedos
+        ! if mg_config_t has non-zero albedos.
+        g%albedo_x_min = 0.0_wp;  g%albedo_x_max = 0.0_wp
+        g%albedo_y_min = 0.0_wp;  g%albedo_y_max = 0.0_wp
+        g%albedo_z_min = 0.0_wp;  g%albedo_z_max = 0.0_wp
+    end subroutine mg_gpu_init
+
+    !> Deallocate device-side arrays. Call from mg_destroy.
+    subroutine mg_gpu_cleanup(g)
+        type(mg_gpu_state_t), intent(inout) :: g
+        if (allocated(g%flux))         deallocate(g%flux)
+        if (allocated(g%flux_new))     deallocate(g%flux_new)
+        if (allocated(g%fission_src))  deallocate(g%fission_src)
+        if (allocated(g%D))            deallocate(g%D)
+        if (allocated(g%sigma_r))      deallocate(g%sigma_r)
+        if (allocated(g%sigma_s))      deallocate(g%sigma_s)
+        if (allocated(g%chi))          deallocate(g%chi)
+        if (allocated(g%external_src)) deallocate(g%external_src)
+    end subroutine mg_gpu_cleanup
+
+    !> Override the six face albedos from the host mg_config_t.
+    subroutine mg_gpu_set_albedos(g, alb_x_min, alb_x_max, &
+                                    alb_y_min, alb_y_max, &
+                                    alb_z_min, alb_z_max)
+        type(mg_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: alb_x_min, alb_x_max
+        real(wp), intent(in) :: alb_y_min, alb_y_max
+        real(wp), intent(in) :: alb_z_min, alb_z_max
+        g%albedo_x_min = alb_x_min;  g%albedo_x_max = alb_x_max
+        g%albedo_y_min = alb_y_min;  g%albedo_y_max = alb_y_max
+        g%albedo_z_min = alb_z_min;  g%albedo_z_max = alb_z_max
+    end subroutine mg_gpu_set_albedos
+
+    ! -----------------------------------------------------------------
+    ! Host <-> device transfer wrappers.
+    !
+    ! With managed memory these are essentially array assignments, but
+    ! they are kept as explicit subroutines so that:
+    !   (a) callers can request an explicit migration before a kernel
+    !       launch to overlap H2D with prior host compute, and
+    !   (b) the same call sites work unchanged if we later switch to
+    !       unmanaged device memory + cuda_memcpy.
+    ! -----------------------------------------------------------------
+
+    !> Copy host mg_state_t fields into the GPU mirror.
+    !! Call this whenever the host has updated cross-sections, sources,
+    !! or the initial flux guess. With managed memory this is essentially
+    !! an array assignment that also forces page residency on the device.
+    subroutine mg_gpu_copy_to_device(g, flux, fission_src, D, sigma_r, &
+                                     sigma_s, chi, external_src, k_eff)
+        type(mg_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: flux(g%nx,g%ny,g%nz,g%ng)
+        real(wp), intent(in) :: fission_src(g%nx,g%ny,g%nz)
+        real(wp), intent(in) :: D(g%nx,g%ny,g%nz,g%ng)
+        real(wp), intent(in) :: sigma_r(g%nx,g%ny,g%nz,g%ng)
+        real(wp), intent(in) :: sigma_s(g%ng,g%ng,g%nx,g%ny,g%nz)
+        real(wp), intent(in) :: chi(g%nx,g%ny,g%nz,g%ng)
+        real(wp), intent(in) :: external_src(g%nx,g%ny,g%nz,g%ng)
+        real(wp), intent(in) :: k_eff
+
+        g%flux         = flux
+        g%fission_src  = fission_src
+        g%D            = D
+        g%sigma_r      = sigma_r
+        g%sigma_s      = sigma_s
+        g%chi          = chi
+        g%external_src = external_src
+        g%k_eff_inv    = 1.0_wp / max(k_eff, 0.005_wp)
+    end subroutine mg_gpu_copy_to_device
+
+    !> Copy the updated flux back to the host mg_state_t. Call after the
+    !! final inner iteration of a group sweep (or after the whole sweep
+    !! completes) so the host can normalise flux and compute power.
+    subroutine mg_gpu_copy_from_device(g, flux)
+        type(mg_gpu_state_t), intent(in) :: g
+        real(wp), intent(out) :: flux(g%nx,g%ny,g%nz,g%ng)
+        flux = g%flux
+    end subroutine mg_gpu_copy_from_device
+
+    ! -----------------------------------------------------------------
+    ! Kernel: one Jacobi sweep of the 7-point diffusion stencil.
+    !
+    ! Each thread updates one (i,j,k) cell of group g. Reads flux (the
+    ! old iterate) from all 6 face neighbours and from the in-scattering
+    ! and fission sources; writes flux_new. The host wrapper then copies
+    ! flux_new into flux and applies BCs.
+    !
+    ! Jacobi (not Gauss-Seidel) is used because:
+    !   - It is race-free under massive thread parallelism.
+    !   - It maps naturally to GPU (no thread-to-thread dependency).
+    !   - Convergence rate is comparable to GS for the under-relaxed
+    !     case (omega=0.8) used in this library.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine jacobi_sweep_kernel( &
+            nx, ny, nz, ng, g, inv_dx2, inv_dy2, inv_dz2, k_eff_inv, &
+            flux, flux_new, D, sigma_r, sigma_s, chi, fission_src, external_src)
+        integer, value :: nx, ny, nz, ng, g
+        real(wp), value :: inv_dx2, inv_dy2, inv_dz2, k_eff_inv
+        ! Device dummy args. Actual args are managed arrays; the device
+        ! attribute is implied because the kernel is attributes(global).
+        real(wp), intent(in)    :: flux(nx,ny,nz,ng)
+        real(wp), intent(out)   :: flux_new(nx,ny,nz,ng)
+        real(wp), intent(in)    :: D(nx,ny,nz,ng)
+        real(wp), intent(in)    :: sigma_r(nx,ny,nz,ng)
+        real(wp), intent(in)    :: sigma_s(ng,ng,nx,ny,nz)
+        real(wp), intent(in)    :: chi(nx,ny,nz,ng)
+        real(wp), intent(in)    :: fission_src(nx,ny,nz)
+        real(wp), intent(in)    :: external_src(nx,ny,nz,ng)
+
+        integer :: i, j, k, gp
+        real(wp) :: Dg, sr
+        real(wp) :: phi_xm, phi_xp, phi_ym, phi_yp, phi_zm, phi_zp
+        real(wp) :: coef_x, coef_y, coef_z, coef_c
+        real(wp) :: inscatter, fission, source, rhs, denom, phi_new
+
+        ! Global thread indices — CUDA Fortran is 1-based when computed
+        ! this way (blockidx and threadidx are 1-based in CUDA Fortran).
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        j = (blockidx%y - 1) * blockdim%y + threadidx%y
+        k = (blockidx%z - 1) * blockdim%z + threadidx%z
+
+        ! Interior only; boundaries handled separately by the host wrapper
+        ! calling mg_gpu_apply_boundary_conditions.
+        if (i < 2 .or. i > nx-1 .or. &
+            j < 2 .or. j > ny-1 .or. &
+            k < 2 .or. k > nz-1) return
+
+        Dg = D(i,j,k,g)
+        sr = sigma_r(i,j,k,g)
+
+        ! Neighbour fluxes (clamped to 0 to match host solver behaviour).
+        phi_xm = max(flux(i-1,j,k,g), 0.0_wp)
+        phi_xp = max(flux(i+1,j,k,g), 0.0_wp)
+        phi_ym = max(flux(i,j-1,k,g), 0.0_wp)
+        phi_yp = max(flux(i,j+1,k,g), 0.0_wp)
+        phi_zm = max(flux(i,j,k-1,g), 0.0_wp)
+        phi_zp = max(flux(i,j,k+1,g), 0.0_wp)
+
+        coef_x = Dg * inv_dx2
+        coef_y = Dg * inv_dy2
+        coef_z = Dg * inv_dz2
+        coef_c = 2.0_wp * (coef_x + coef_y + coef_z)
+
+        ! In-scattering from other groups. Safe to read flux(i,j,k,gp)
+        ! for gp /= g because only group g is being written.
+        inscatter = 0.0_wp
+        do gp = 1, ng
+            if (gp /= g) then
+                inscatter = inscatter + sigma_s(gp,g,i,j,k) * &
+                            max(flux(i,j,k,gp), 0.0_wp)
+            end if
+        end do
+
+        ! Fission source (precomputed on host; we just scale by chi/k_eff).
+        fission = chi(i,j,k,g) * fission_src(i,j,k) * k_eff_inv
+
+        source = inscatter + fission + external_src(i,j,k,g)
+
+        rhs = coef_x*(phi_xm + phi_xp) + coef_y*(phi_ym + phi_yp) + &
+              coef_z*(phi_zm + phi_zp) + source
+
+        denom = max(coef_c + sr, MIN_DENOM)
+        phi_new = rhs / denom
+
+        ! Under-relaxation toward the previous iterate.
+        phi_new = RELAX * phi_new + ONE_MINUS_RELAX * flux(i,j,k,g)
+
+        ! Clamp to physical range (matches host MAX_FLUX guard).
+        phi_new = max(min(phi_new, MAX_FLUX), 0.0_wp)
+
+        flux_new(i,j,k,g) = phi_new
+    end subroutine jacobi_sweep_kernel
+
+    ! -----------------------------------------------------------------
+    ! Host wrapper: launch the kernel, copy flux_new -> flux, sync, BCs.
+    !
+    ! This is the drop-in replacement for solve_group_equation_safe.
+    ! Call as:
+    !   call mg_gpu_source_iteration_step(gpu_state, g)
+    ! -----------------------------------------------------------------
+    subroutine mg_gpu_source_iteration_step(g, group)
+        type(mg_gpu_state_t), intent(inout) :: g
+        integer, intent(in) :: group
+        type(dim3) :: grid, tblock
+        integer :: istat
+
+        ! 256 threads per block in an 8x8x4 layout — good occupancy on
+        ! Ampere/Hopper and matches the 3-D structure of the stencil.
+        tblock = dim3(8, 8, 4)
+        grid   = dim3((g%nx + 7) / 8, (g%ny + 7) / 8, (g%nz + 3) / 4)
+
+        ! Launch the interior sweep.
+        call jacobi_sweep_kernel<<<grid, tblock>>>( &
+                g%nx, g%ny, g%nz, g%ng, group, &
+                g%inv_dx2, g%inv_dy2, g%inv_dz2, g%k_eff_inv, &
+                g%flux, g%flux_new, g%D, g%sigma_r, g%sigma_s, &
+                g%chi, g%fission_src, g%external_src)
+
+        ! Synchronous wait so the host can safely copy flux_new into flux.
+        ! Without this, the host would read stale data because kernel
+        ! launches are async.
+        istat = cudaDeviceSynchronize()
+        g%cuda_status = istat
+        if (istat /= 0) return
+
+        ! Copy flux_new(group) into flux(group). With managed memory this
+        ! is a host-side array assignment that triggers a D2H migration
+        ! of the dirty pages.
+        g%flux(:,:,:,group) = g%flux_new(:,:,:,group)
+
+        ! Apply albedo boundary conditions on the host (small surface, no
+        ! benefit from a kernel). Mirrors apply_boundary_conditions in
+        ! multigroup_diffusion.f90.
+        call mg_gpu_apply_boundary_conditions(g, group)
+    end subroutine mg_gpu_source_iteration_step
+
+    !> Apply 6-face albedo boundary conditions to group g.
+    !! Small surface (O(nx*ny + nx*nz + ny*nz) cells) — host-side is fine.
+    subroutine mg_gpu_apply_boundary_conditions(g, group)
+        type(mg_gpu_state_t), intent(inout) :: g
+        integer, intent(in) :: group
+        integer :: nx, ny, nz, gg
+        nx = g%nx;  ny = g%ny;  nz = g%nz;  gg = group
+
+        ! X faces (albedo: phi_boundary = albedo * phi_interior_neighbour)
+        g%flux(1,:,:,gg)  = g%albedo_x_min * g%flux(2,:,:,gg)
+        g%flux(nx,:,:,gg) = g%albedo_x_max * g%flux(nx-1,:,:,gg)
+        ! Y faces
+        g%flux(:,1,:,gg)  = g%albedo_y_min * g%flux(:,2,:,gg)
+        g%flux(:,ny,:,gg) = g%albedo_y_max * g%flux(:,ny-1,:,gg)
+        ! Z faces
+        g%flux(:,:,1,gg)  = g%albedo_z_min * g%flux(:,:,2,gg)
+        g%flux(:,:,nz,gg) = g%albedo_z_max * g%flux(:,:,nz-1,gg)
+    end subroutine mg_gpu_apply_boundary_conditions
+
+end module multigroup_diffusion_gpu
