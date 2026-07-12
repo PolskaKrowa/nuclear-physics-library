@@ -1,0 +1,349 @@
+! cuda/two_phase_flow_gpu.cuf
+!
+! CUDA Fortran acceleration of the two-phase flow per-cell update.
+!
+! Each thread computes the two-phase parameters for one (i,j,k) cell:
+!   - Quality (enthalpy-based)
+!   - Void fraction (homogeneous / drift-flux)
+!   - Slip ratio and phase velocities
+!   - CHF ratio (Groeneveld simplified)
+!
+! The per-cell computation is embarrassingly parallel — no inter-cell
+! dependencies — making it an ideal GPU target.
+!
+! Uses managed memory for all arrays. The host calls two_phase_gpu_step
+! after two_phase_init to update all cells in parallel.
+
+module two_phase_flow_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    implicit none
+    private
+
+    public :: tp_gpu_state_t
+    public :: tp_gpu_init, tp_gpu_cleanup
+    public :: tp_gpu_step, tp_gpu_copy_from_device
+
+    ! Physical constants
+    real(wp), parameter :: TOL = 1.0e-12_wp
+
+    !> GPU-side state for two-phase flow.
+    type :: tp_gpu_state_t
+        integer :: nx, ny, nz
+        real(wp), allocatable, managed :: temperature(:,:,:)   ! [K]
+        real(wp), allocatable, managed :: pressure(:,:,:)      ! [Pa]
+        real(wp), allocatable, managed :: mass_flux(:,:,:)     ! [kg/m²·s]
+        real(wp), allocatable, managed :: heat_flux(:,:,:)     ! [W/m²]
+        real(wp), allocatable, managed :: diameter(:,:,:)      ! hydraulic diameter [m]
+        real(wp), allocatable, managed :: heated_perimeter(:,:,:)  ! [m]
+
+        ! Output fields
+        real(wp), allocatable, managed :: quality(:,:,:)
+        real(wp), allocatable, managed :: void_fraction(:,:,:)
+        real(wp), allocatable, managed :: slip_ratio(:,:,:)
+        real(wp), allocatable, managed :: velocity_liquid(:,:,:)
+        real(wp), allocatable, managed :: velocity_vapour(:,:,:)
+        real(wp), allocatable, managed :: chf_ratio(:,:,:)
+        integer, allocatable, managed :: boiling(:,:,:)         ! 0 or 1
+
+        ! Statistics (reduced on host after kernel)
+        real(wp), allocatable, managed :: max_void(:)
+        integer, allocatable, managed :: n_boiling(:)
+
+        integer :: cuda_status = 0
+    end type tp_gpu_state_t
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Device functions: water properties and correlations.
+    ! These are simplified versions of the host correlations, suitable
+    ! for GPU execution (no branches on allocatable arrays).
+    ! -----------------------------------------------------------------
+
+    !> Simplified IAPWS water properties (device function).
+    !! Returns saturation temperature, liquid/vapour densities, and
+    !! latent heat as a function of pressure.
+    attributes(device) function gpu_water_props(p) result(props)
+        real(wp), intent(in) :: p
+        real(wp) :: props(5)  ! T_sat, rho_l, rho_g, h_fg, cp_l
+
+        ! Simplified saturation temperature (Antoine-like, valid 0.1-20 MPa)
+        real(wp) :: p_bar
+        p_bar = p * 1.0e-5_wp
+        ! T_sat = 1/(1/373.15 - R/L * ln(p/101325))  (Clausius-Clapeyron)
+        props(1) = 1.0_wp / (1.0_wp / 373.15_wp - 461.5_wp / 2257.0e3_wp * log(max(p, 1.0e5_wp) / 101325.0_wp))
+
+        ! Liquid density (linear approximation near operating conditions)
+        props(2) = 1000.0_wp * (1.0_wp - 0.0003_wp * (props(1) - 300.0_wp))
+
+        ! Vapour density (ideal gas approximation)
+        props(3) = p / (461.5_wp * props(1))
+
+        ! Latent heat (decreases with temperature)
+        props(4) = 2257.0e3_wp * (1.0_wp - 0.0005_wp * (props(1) - 373.15_wp))
+
+        ! Liquid specific heat
+        props(5) = 4186.0_wp
+    end function gpu_water_props
+
+    !> Homogeneous void fraction (device function).
+    attributes(device) function gpu_void_homogeneous(x, props) result(alpha)
+        real(wp), intent(in) :: x, props(5)
+        real(wp) :: alpha
+        real(wp) :: v_l, v_g
+        v_l = 1.0_wp / props(2)        ! specific volume liquid
+        v_g = 1.0_wp / props(3)        ! specific volume vapour
+        if (x <= 0.0_wp) then
+            alpha = 0.0_wp
+        else if (x >= 1.0_wp) then
+            alpha = 1.0_wp
+        else
+            alpha = (x * v_g) / ((1.0_wp - x) * v_l + x * v_g)
+        end if
+    end function gpu_void_homogeneous
+
+    !> Zuber-Findlay drift-flux void fraction (device function).
+    attributes(device) function gpu_void_zuber_findlay(x, G, p, props) result(alpha)
+        real(wp), intent(in) :: x, G, p, props(5)
+        real(wp) :: alpha
+        real(wp) :: v_gj, C0, j_l, j_g, j, denom
+
+        ! Drift flux parameters (simplified for BWR conditions)
+        C0 = 1.13_wp       ! Distribution parameter
+        v_gj = 1.53_wp * (9.81_wp * (props(2) - props(3)) / props(3)**2)**0.25_wp
+
+        if (x <= 0.0_wp) then
+            alpha = 0.0_wp
+        else
+            j_l = G * (1.0_wp - x) / props(2)
+            j_g = G * x / props(3)
+            j = j_l + j_g
+            denom = j + v_gj / max(1.0_wp - C0 * alpha, TOL)
+            if (denom > TOL) then
+                alpha = j_g / (C0 * j + v_gj)
+                alpha = max(0.0_wp, min(1.0_wp, alpha))
+            else
+                alpha = 0.0_wp
+            end if
+        end if
+    end function gpu_void_zuber_findlay
+
+    !> Simplified Groeneveld CHF look-up (device function).
+    attributes(device) function gpu_chf_groeneveld(G, p, x, D_h) result(q_chf)
+        real(wp), intent(in) :: G, p, x, D_h
+        real(wp) :: q_chf
+        real(wp) :: p_base
+
+        ! Very simplified Groeneveld 2006 LUT interpolation.
+        ! Base CHF at reference conditions (G=2000, p=7MPa, x=0, D=8mm).
+        p_base = 1000.0e3_wp   ! Base CHF ~1 MW/m²
+
+        ! Pressure correction (peaks near 3-7 MPa)
+        q_chf = p_base * (1.0_wp - 0.05_wp * abs(p * 1.0e-6_wp - 7.0_wp) / 7.0_wp)
+
+        ! Mass flux correction (higher G → higher CHF, up to a limit)
+        q_chf = q_chf * min(1.5_wp, max(0.5_wp, G / 2000.0_wp))
+
+        ! Quality correction (higher quality → lower CHF)
+        if (x > 0.0_wp) then
+            q_chf = q_chf * max(0.2_wp, 1.0_wp - 0.8_wp * x)
+        end if
+
+        ! Diameter correction
+        q_chf = q_chf * (8.0e-3_wp / max(D_h, 1.0e-3_wp))**0.2_wp
+
+        q_chf = max(q_chf, 100.0e3_wp)  ! Floor at 100 kW/m²
+    end function gpu_chf_groeneveld
+
+    ! -----------------------------------------------------------------
+    ! Kernel: per-cell two-phase update.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine tp_step_kernel( &
+            nx, ny, nz, temperature, pressure, mass_flux, heat_flux, &
+            diameter, heated_perimeter, quality, void_fraction, slip_ratio, &
+            velocity_liquid, velocity_vapour, chf_ratio, boiling)
+        integer, value :: nx, ny, nz
+        real(wp), intent(in) :: temperature(nx,ny,nz), pressure(nx,ny,nz)
+        real(wp), intent(in) :: mass_flux(nx,ny,nz), heat_flux(nx,ny,nz)
+        real(wp), intent(in) :: diameter(nx,ny,nz), heated_perimeter(nx,ny,nz)
+        real(wp), intent(out) :: quality(nx,ny,nz), void_fraction(nx,ny,nz)
+        real(wp), intent(out) :: slip_ratio(nx,ny,nz)
+        real(wp), intent(out) :: velocity_liquid(nx,ny,nz), velocity_vapour(nx,ny,nz)
+        real(wp), intent(out) :: chf_ratio(nx,ny,nz)
+        integer, intent(out) :: boiling(nx,ny,nz)
+
+        integer :: i, j, k
+        real(wp) :: T, p, G, q_pp, D_h, x, alpha, S, v_l, v_g
+        real(wp) :: props(5), q_chf
+
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        j = (blockidx%y - 1) * blockdim%y + threadidx%y
+        k = (blockidx%z - 1) * blockdim%z + threadidx%z
+
+        if (i < 1 .or. i > nx .or. j < 1 .or. j > ny .or. k < 1 .or. k > nz) return
+
+        T = temperature(i,j,k)
+        p = pressure(i,j,k)
+        G = mass_flux(i,j,k)
+        q_pp = heat_flux(i,j,k)
+        D_h = diameter(i,j,k)
+
+        ! Water properties
+        props = gpu_water_props(p)
+
+        ! Quality (enthalpy-based, simplified)
+        if (T >= props(1)) then
+            ! Superheated or saturated
+            x = (T - props(1)) * props(5) / max(props(4), TOL)
+            x = max(0.0_wp, min(1.0_wp, x))
+        else
+            ! Subcooled: quality from heat balance
+            x = -props(5) * (props(1) - T) / max(props(4), TOL)
+        end if
+        quality(i,j,k) = x
+
+        ! Boiling flag
+        if (x > -TOL) then
+            boiling(i,j,k) = 1
+        else
+            boiling(i,j,k) = 0
+        end if
+
+        ! Void fraction (drift-flux for two-phase, zero for subcooled)
+        if (x <= 0.0_wp) then
+            alpha = 0.0_wp
+        else
+            alpha = gpu_void_zuber_findlay(x, G, p, props)
+        end if
+        void_fraction(i,j,k) = alpha
+
+        ! Slip ratio and velocities
+        if (alpha > TOL .and. alpha < 1.0_wp - TOL) then
+            S = (x / max(props(3), TOL)) / ((1.0_wp - x) / max(props(2), TOL) * &
+                (1.0_wp - alpha) / max(alpha, TOL))
+            S = max(0.1_wp, min(10.0_wp, S))
+            v_l = G * (1.0_wp - x) / (props(2) * max(1.0_wp - alpha, TOL))
+            v_g = S * v_l
+        else if (alpha <= TOL) then
+            S = 1.0_wp
+            v_l = G / max(props(2), TOL)
+            v_g = 0.0_wp
+        else
+            S = 1.0_wp
+            v_l = 0.0_wp
+            v_g = G * x / max(props(3), TOL)
+        end if
+        slip_ratio(i,j,k) = S
+        velocity_liquid(i,j,k) = v_l
+        velocity_vapour(i,j,k) = v_g
+
+        ! CHF ratio
+        if (q_pp > TOL .and. x > -TOL) then
+            q_chf = gpu_chf_groeneveld(G, p, x, D_h)
+            chf_ratio(i,j,k) = q_chf / max(q_pp, TOL)
+        else
+            chf_ratio(i,j,k) = 1.0e10_wp
+        end if
+    end subroutine tp_step_kernel
+
+    ! -----------------------------------------------------------------
+    ! Lifecycle and host wrappers.
+    ! -----------------------------------------------------------------
+
+    subroutine tp_gpu_init(g, nx, ny, nz)
+        type(tp_gpu_state_t), intent(out) :: g
+        integer, intent(in) :: nx, ny, nz
+        integer :: istat
+
+        g%nx = nx;  g%ny = ny;  g%nz = nz
+
+        allocate(g%temperature(nx,ny,nz), stat=istat)
+        g%cuda_status = istat;  if (istat /= 0) return
+        allocate(g%pressure(nx,ny,nz), stat=istat)
+        allocate(g%mass_flux(nx,ny,nz), stat=istat)
+        allocate(g%heat_flux(nx,ny,nz), stat=istat)
+        allocate(g%diameter(nx,ny,nz), stat=istat)
+        allocate(g%heated_perimeter(nx,ny,nz), stat=istat)
+        allocate(g%quality(nx,ny,nz), stat=istat)
+        allocate(g%void_fraction(nx,ny,nz), stat=istat)
+        allocate(g%slip_ratio(nx,ny,nz), stat=istat)
+        allocate(g%velocity_liquid(nx,ny,nz), stat=istat)
+        allocate(g%velocity_vapour(nx,ny,nz), stat=istat)
+        allocate(g%chf_ratio(nx,ny,nz), stat=istat)
+        allocate(g%boiling(nx,ny,nz), stat=istat)
+        allocate(g%max_void(1), stat=istat)
+        allocate(g%n_boiling(1), stat=istat)
+
+        g%cuda_status = istat
+        g%temperature = 0.0_wp;  g%pressure = 0.0_wp
+        g%mass_flux = 0.0_wp;  g%heat_flux = 0.0_wp
+        g%diameter = 0.01_wp;  g%heated_perimeter = 0.0_wp
+        g%quality = 0.0_wp;  g%void_fraction = 0.0_wp
+        g%slip_ratio = 1.0_wp
+        g%velocity_liquid = 0.0_wp;  g%velocity_vapour = 0.0_wp
+        g%chf_ratio = 1.0e10_wp;  g%boiling = 0
+        g%max_void = 0.0_wp;  g%n_boiling = 0
+    end subroutine tp_gpu_init
+
+    subroutine tp_gpu_cleanup(g)
+        type(tp_gpu_state_t), intent(inout) :: g
+        if (allocated(g%temperature)) deallocate(g%temperature)
+        if (allocated(g%pressure)) deallocate(g%pressure)
+        if (allocated(g%mass_flux)) deallocate(g%mass_flux)
+        if (allocated(g%heat_flux)) deallocate(g%heat_flux)
+        if (allocated(g%diameter)) deallocate(g%diameter)
+        if (allocated(g%heated_perimeter)) deallocate(g%heated_perimeter)
+        if (allocated(g%quality)) deallocate(g%quality)
+        if (allocated(g%void_fraction)) deallocate(g%void_fraction)
+        if (allocated(g%slip_ratio)) deallocate(g%slip_ratio)
+        if (allocated(g%velocity_liquid)) deallocate(g%velocity_liquid)
+        if (allocated(g%velocity_vapour)) deallocate(g%velocity_vapour)
+        if (allocated(g%chf_ratio)) deallocate(g%chf_ratio)
+        if (allocated(g%boiling)) deallocate(g%boiling)
+        if (allocated(g%max_void)) deallocate(g%max_void)
+        if (allocated(g%n_boiling)) deallocate(g%n_boiling)
+    end subroutine tp_gpu_cleanup
+
+    !> Launch the per-cell update kernel.
+    subroutine tp_gpu_step(g, T, p, G, q_pp, D_h, heated_perim)
+        type(tp_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: T(g%nx,g%ny,g%nz), p(g%nx,g%ny,g%nz)
+        real(wp), intent(in) :: G(g%nx,g%ny,g%nz), q_pp(g%nx,g%ny,g%nz)
+        real(wp), intent(in) :: D_h(g%nx,g%ny,g%nz), heated_perim(g%nx,g%ny,g%nz)
+        type(dim3) :: grid, tblock
+        integer :: istat
+
+        ! Copy inputs to managed memory
+        g%temperature = T;  g%pressure = p
+        g%mass_flux = G;  g%heat_flux = q_pp
+        g%diameter = D_h;  g%heated_perimeter = heated_perim
+
+        tblock = dim3(8, 8, 4)
+        grid = dim3((g%nx + 7) / 8, (g%ny + 7) / 8, (g%nz + 3) / 4)
+
+        call tp_step_kernel<<<grid, tblock>>>( &
+            g%nx, g%ny, g%nz, g%temperature, g%pressure, g%mass_flux, &
+            g%heat_flux, g%diameter, g%heated_perimeter, g%quality, &
+            g%void_fraction, g%slip_ratio, g%velocity_liquid, &
+            g%velocity_vapour, g%chf_ratio, g%boiling)
+
+        istat = cudaDeviceSynchronize()
+        g%cuda_status = istat
+    end subroutine tp_gpu_step
+
+    !> Copy output fields back to host arrays.
+    subroutine tp_gpu_copy_from_device(g, quality, void_frac, slip, v_l, v_g, chfr, boiling)
+        type(tp_gpu_state_t), intent(in) :: g
+        real(wp), intent(out) :: quality(g%nx,g%ny,g%nz), void_frac(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: slip(g%nx,g%ny,g%nz), v_l(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: v_g(g%nx,g%ny,g%nz), chfr(g%nx,g%ny,g%nz)
+        integer, intent(out) :: boiling(g%nx,g%ny,g%nz)
+
+        quality = g%quality;  void_frac = g%void_fraction
+        slip = g%slip_ratio;  v_l = g%velocity_liquid
+        v_g = g%velocity_vapour;  chfr = g%chf_ratio
+        boiling = g%boiling
+    end subroutine tp_gpu_copy_from_device
+
+end module two_phase_flow_gpu

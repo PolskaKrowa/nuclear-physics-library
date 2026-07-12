@@ -1,0 +1,338 @@
+! cuda/reductions_gpu.cuf
+!
+! GPU reduction kernels for common parallel reductions:
+!   - sum (for fission source totals, flux norms)
+!   - max (for convergence checks, peaking factors)
+!   - min (for CHF ratio, safety margins)
+!   - dot product (for inner products in iterative solvers)
+!
+! Uses a tree reduction within each thread block (warp-level for the
+! final step) and a two-pass approach for large arrays: pass 1 reduces
+! each block to a partial sum, pass 2 reduces the partial sums.
+!
+! All kernels operate on managed memory arrays so the host can read
+! results directly without explicit D2H copies.
+!
+! Build: compiled as part of nuclear_physics_cuda when BUILD_WITH_CUDA=ON.
+
+module reductions_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    implicit none
+    private
+
+    public :: gpu_sum, gpu_max, gpu_min, gpu_dot
+    public :: gpu_sum_3d, gpu_max_3d
+
+    ! Block size for reductions. 256 threads = 8 warps, good occupancy.
+    integer, parameter :: REDUCTION_BLOCK = 256
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Kernel: block-level sum reduction.
+    ! Each block reduces REDUCTION_BLOCK elements to a single partial sum.
+    ! The host wrapper accumulates the partial sums.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine sum_reduce_kernel(input, n, partial_sums)
+        real(wp), intent(in) :: input(*)
+        integer, value :: n
+        real(wp), intent(out) :: partial_sums(*)
+
+        ! Shared memory for inter-warp reduction within the block.
+        real(wp), shared :: sdata(REDUCTION_BLOCK)
+        integer :: tid, blockidx_local, i, grid_stride
+        real(wp) :: my_sum
+
+        tid = threadidx%x
+        blockidx_local = blockidx%x
+
+        ! Grid-stride loop: each thread accumulates multiple elements
+        ! when n > REDUCTION_BLOCK * gridDim%x.
+        my_sum = 0.0_wp
+        do i = tid + (blockidx_local - 1) * REDUCTION_BLOCK, n, REDUCTION_BLOCK * griddim%x
+            if (i <= n) then
+                my_sum = my_sum + input(i)
+            end if
+        end do
+
+        sdata(tid) = my_sum
+        call syncthreads()
+
+        ! Tree reduction in shared memory.
+        do grid_stride = REDUCTION_BLOCK / 2, 1, grid_stride / 2
+            if (tid <= grid_stride) then
+                sdata(tid) = sdata(tid) + sdata(tid + grid_stride)
+            end if
+            call syncthreads()
+        end do
+
+        ! Thread 0 writes the block's partial sum.
+        if (tid == 1) then
+            partial_sums(blockidx_local) = sdata(1)
+        end if
+    end subroutine sum_reduce_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: block-level max reduction.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine max_reduce_kernel(input, n, partial_max)
+        real(wp), intent(in) :: input(*)
+        integer, value :: n
+        real(wp), intent(out) :: partial_max(*)
+
+        real(wp), shared :: sdata(REDUCTION_BLOCK)
+        integer :: tid, blockidx_local, i, grid_stride
+        real(wp) :: my_max
+
+        tid = threadidx%x
+        blockidx_local = blockidx%x
+
+        my_max = -huge(1.0_wp)
+        do i = tid + (blockidx_local - 1) * REDUCTION_BLOCK, n, REDUCTION_BLOCK * griddim%x
+            if (i <= n) then
+                my_max = max(my_max, input(i))
+            end if
+        end do
+
+        sdata(tid) = my_max
+        call syncthreads()
+
+        do grid_stride = REDUCTION_BLOCK / 2, 1, grid_stride / 2
+            if (tid <= grid_stride) then
+                sdata(tid) = max(sdata(tid), sdata(tid + grid_stride))
+            end if
+            call syncthreads()
+        end do
+
+        if (tid == 1) then
+            partial_max(blockidx_local) = sdata(1)
+        end if
+    end subroutine max_reduce_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: block-level min reduction.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine min_reduce_kernel(input, n, partial_min)
+        real(wp), intent(in) :: input(*)
+        integer, value :: n
+        real(wp), intent(out) :: partial_min(*)
+
+        real(wp), shared :: sdata(REDUCTION_BLOCK)
+        integer :: tid, blockidx_local, i, grid_stride
+        real(wp) :: my_min
+
+        tid = threadidx%x
+        blockidx_local = blockidx%x
+
+        my_min = huge(1.0_wp)
+        do i = tid + (blockidx_local - 1) * REDUCTION_BLOCK, n, REDUCTION_BLOCK * griddim%x
+            if (i <= n) then
+                my_min = min(my_min, input(i))
+            end if
+        end do
+
+        sdata(tid) = my_min
+        call syncthreads()
+
+        do grid_stride = REDUCTION_BLOCK / 2, 1, grid_stride / 2
+            if (tid <= grid_stride) then
+                sdata(tid) = min(sdata(tid), sdata(tid + grid_stride))
+            end if
+            call syncthreads()
+        end do
+
+        if (tid == 1) then
+            partial_min(blockidx_local) = sdata(1)
+        end if
+    end subroutine min_reduce_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: dot product reduction. Computes sum(a(i) * b(i)).
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine dot_reduce_kernel(a, b, n, partial_dots)
+        real(wp), intent(in) :: a(*), b(*)
+        integer, value :: n
+        real(wp), intent(out) :: partial_dots(*)
+
+        real(wp), shared :: sdata(REDUCTION_BLOCK)
+        integer :: tid, blockidx_local, i, grid_stride
+        real(wp) :: my_dot
+
+        tid = threadidx%x
+        blockidx_local = blockidx%x
+
+        my_dot = 0.0_wp
+        do i = tid + (blockidx_local - 1) * REDUCTION_BLOCK, n, REDUCTION_BLOCK * griddim%x
+            if (i <= n) then
+                my_dot = my_dot + a(i) * b(i)
+            end if
+        end do
+
+        sdata(tid) = my_dot
+        call syncthreads()
+
+        do grid_stride = REDUCTION_BLOCK / 2, 1, grid_stride / 2
+            if (tid <= grid_stride) then
+                sdata(tid) = sdata(tid) + sdata(tid + grid_stride)
+            end if
+            call syncthreads()
+        end do
+
+        if (tid == 1) then
+            partial_dots(blockidx_local) = sdata(1)
+        end if
+    end subroutine dot_reduce_kernel
+
+    ! -----------------------------------------------------------------
+    ! Host wrappers.
+    ! -----------------------------------------------------------------
+
+    !> Compute sum of a 1D array on the GPU. Two-pass: pass 1 reduces
+    !! each block to a partial sum, pass 2 reduces the partial sums.
+    function gpu_sum(input, n) result(total)
+        real(wp), intent(in) :: input(*)
+        integer, intent(in) :: n
+        real(wp) :: total
+
+        real(wp), allocatable, managed :: partial(:)
+        integer :: num_blocks, istat, i
+        type(dim3) :: grid, tblock
+
+        if (n <= 0) then
+            total = 0.0_wp
+            return
+        end if
+
+        num_blocks = (n + REDUCTION_BLOCK - 1) / REDUCTION_BLOCK
+        allocate(partial(num_blocks))
+
+        tblock = dim3(REDUCTION_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call sum_reduce_kernel<<<grid, tblock>>>(input, n, partial)
+        istat = cudaDeviceSynchronize()
+
+        ! Final reduction on the host (num_blocks is typically small).
+        total = 0.0_wp
+        do i = 1, num_blocks
+            total = total + partial(i)
+        end do
+
+        deallocate(partial)
+    end function gpu_sum
+
+    !> Compute max of a 1D array on the GPU.
+    function gpu_max(input, n) result(maxval_)
+        real(wp), intent(in) :: input(*)
+        integer, intent(in) :: n
+        real(wp) :: maxval_
+
+        real(wp), allocatable, managed :: partial(:)
+        integer :: num_blocks, istat, i
+        type(dim3) :: grid, tblock
+
+        if (n <= 0) then
+            maxval_ = -huge(1.0_wp)
+            return
+        end if
+
+        num_blocks = (n + REDUCTION_BLOCK - 1) / REDUCTION_BLOCK
+        allocate(partial(num_blocks))
+
+        tblock = dim3(REDUCTION_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call max_reduce_kernel<<<grid, tblock>>>(input, n, partial)
+        istat = cudaDeviceSynchronize()
+
+        maxval_ = -huge(1.0_wp)
+        do i = 1, num_blocks
+            maxval_ = max(maxval_, partial(i))
+        end do
+
+        deallocate(partial)
+    end function gpu_max
+
+    !> Compute min of a 1D array on the GPU.
+    function gpu_min(input, n) result(minval_)
+        real(wp), intent(in) :: input(*)
+        integer, intent(in) :: n
+        real(wp) :: minval_
+
+        real(wp), allocatable, managed :: partial(:)
+        integer :: num_blocks, istat, i
+        type(dim3) :: grid, tblock
+
+        if (n <= 0) then
+            minval_ = huge(1.0_wp)
+            return
+        end if
+
+        num_blocks = (n + REDUCTION_BLOCK - 1) / REDUCTION_BLOCK
+        allocate(partial(num_blocks))
+
+        tblock = dim3(REDUCTION_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call min_reduce_kernel<<<grid, tblock>>>(input, n, partial)
+        istat = cudaDeviceSynchronize()
+
+        minval_ = huge(1.0_wp)
+        do i = 1, num_blocks
+            minval_ = min(minval_, partial(i))
+        end do
+
+        deallocate(partial)
+    end function gpu_min
+
+    !> Compute dot product of two 1D arrays on the GPU.
+    function gpu_dot(a, b, n) result(dotval)
+        real(wp), intent(in) :: a(*), b(*)
+        integer, intent(in) :: n
+        real(wp) :: dotval
+
+        real(wp), allocatable, managed :: partial(:)
+        integer :: num_blocks, istat, i
+        type(dim3) :: grid, tblock
+
+        if (n <= 0) then
+            dotval = 0.0_wp
+            return
+        end if
+
+        num_blocks = (n + REDUCTION_BLOCK - 1) / REDUCTION_BLOCK
+        allocate(partial(num_blocks))
+
+        tblock = dim3(REDUCTION_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call dot_reduce_kernel<<<grid, tblock>>>(a, b, n, partial)
+        istat = cudaDeviceSynchronize()
+
+        dotval = 0.0_wp
+        do i = 1, num_blocks
+            dotval = dotval + partial(i)
+        end do
+
+        deallocate(partial)
+    end function gpu_dot
+
+    !> Compute sum of a 3D array on the GPU. The array is flattened
+    !! to 1D and passed to gpu_sum.
+    function gpu_sum_3d(input, nx, ny, nz) result(total)
+        real(wp), intent(in) :: input(nx, ny, nz)
+        integer, intent(in) :: nx, ny, nz
+        real(wp) :: total
+        total = gpu_sum(input, nx * ny * nz)
+    end function gpu_sum_3d
+
+    !> Compute max of a 3D array on the GPU.
+    function gpu_max_3d(input, nx, ny, nz) result(maxval_)
+        real(wp), intent(in) :: input(nx, ny, nz)
+        integer, intent(in) :: nx, ny, nz
+        real(wp) :: maxval_
+        maxval_ = gpu_max(input, nx * ny * nz)
+    end function gpu_max_3d
+
+end module reductions_gpu

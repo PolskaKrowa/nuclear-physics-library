@@ -308,12 +308,16 @@ contains
                 return
             end if
             
-            ! Compute Jacobian using finite differences
+            ! Compute Jacobian using finite differences.
+            ! Performance note: the previous code did `y_perturbed = y_new`
+            ! (full array copy) inside the loop — O(n²) memory traffic for
+            ! an O(n) Jacobian build. We now save/restore only the single
+            ! perturbed element, reducing memory traffic to O(n).
             do i = 1, n
-                y_perturbed = y_new
-                y_perturbed(i) = y_perturbed(i) + eps
+                y_perturbed(i) = y_new(i) + eps
                 call func(t + dt, y_perturbed, f_perturbed)
                 jacobian(:, i) = (f_perturbed - f_new) / eps
+                y_perturbed(i) = y_new(i)  ! restore for next iteration
             end do
             
             ! System matrix: I - dt*J

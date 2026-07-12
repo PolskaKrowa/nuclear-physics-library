@@ -326,8 +326,11 @@ contains
         end if
     end subroutine fd_laplacian_1d
     
-    !> Compute 2D Laplacian: ∇²u = ∂²u/∂x² + ∂²u/∂y²
-    pure subroutine fd_laplacian_2d(u, laplacian, dx, dy)
+    !> Compute 2D Laplacian.
+    !!
+    !! Performance note: the interior 5-point stencil loop is OpenMP-parallel
+    !! over (i,j). The `pure` attribute was removed to allow OpenMP directives.
+    subroutine fd_laplacian_2d(u, laplacian, dx, dy)
         real(wp), intent(in) :: u(:, :)
         real(wp), intent(out) :: laplacian(:, :)
         real(wp), intent(in) :: dx, dy
@@ -341,12 +344,14 @@ contains
         inv_dy2 = 1.0_wp / (dy * dy)
         
         ! Interior points (standard 5-point stencil)
+        !$OMP PARALLEL DO PRIVATE(i, j) SCHEDULE(STATIC)
         do j = 2, ny - 1
             do i = 2, nx - 1
                 laplacian(i, j) = (u(i - 1, j) - 2.0_wp * u(i, j) + u(i + 1, j)) * inv_dx2 + &
                                   (u(i, j - 1) - 2.0_wp * u(i, j) + u(i, j + 1)) * inv_dy2
             end do
         end do
+        !$OMP END PARALLEL DO
         
         ! Periodic boundaries
         ! Bottom and top edges
@@ -384,8 +389,13 @@ contains
                             (u(nx, ny - 1) - 2.0_wp * u(nx, ny) + u(nx, 1)) * inv_dy2
     end subroutine fd_laplacian_2d
     
-    !> Compute 3D Laplacian
-    pure subroutine fd_laplacian_3d(u, laplacian, dx, dy, dz)
+    !> Compute 3D Laplacian.
+    !!
+    !! Performance note: the interior 7-point stencil loop is OpenMP-parallel
+    !! over (i,j,k). This is the single hottest loop in the heat_transfer
+    !! module (called once per heat_step). The `pure` attribute was removed
+    !! to allow OpenMP directives.
+    subroutine fd_laplacian_3d(u, laplacian, dx, dy, dz)
         real(wp), intent(in) :: u(:, :, :)
         real(wp), intent(out) :: laplacian(:, :, :)
         real(wp), intent(in) :: dx, dy, dz
@@ -401,6 +411,7 @@ contains
         inv_dz2 = 1.0_wp / (dz * dz)
         
         ! Interior points (7-point stencil)
+        !$OMP PARALLEL DO PRIVATE(i, j, k) SCHEDULE(STATIC)
         do k = 2, nz - 1
             do j = 2, ny - 1
                 do i = 2, nx - 1
@@ -411,6 +422,7 @@ contains
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
         
         ! Boundary points: one-sided second derivative.
         ! The previous code set ALL boundary values to 0 ("simplified"),

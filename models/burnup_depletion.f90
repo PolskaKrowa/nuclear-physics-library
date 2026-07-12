@@ -32,6 +32,15 @@
 module burnup_depletion
     use kinds, only: wp, i32
     use constants, only: TOL_DEFAULT, N_AVOGADRO
+    use compute_mode, only: use_gpu, gpu_min_workload
+#ifdef COMPUTATION_MODE_GPU
+    use burnup_depletion_gpu, only: burnup_gpu_state_t, burnup_gpu_init, &
+        burnup_gpu_cleanup, burnup_gpu_step, burnup_gpu_copy_from_device
+#endif
+#ifdef COMPUTATION_MODE_HYBRID
+    use burnup_depletion_gpu, only: burnup_gpu_state_t, burnup_gpu_init, &
+        burnup_gpu_cleanup, burnup_gpu_step, burnup_gpu_copy_from_device
+#endif
     implicit none
     private
     
@@ -246,12 +255,26 @@ contains
         integer :: i, j, k
         real(wp) :: phi_th, P
         
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+        ! GPU dispatch: offload per-cell depletion to GPU when large enough.
+        if (use_gpu()) then
+            if (state%nx * state%ny * state%nz >= gpu_min_workload()) then
+                call burnup_step_gpu(state, flux, power, dt)
+                return
+            end if
+        end if
+#endif
+        
         ! Note: deplete_cell handles its own substepping internally
         ! (it divides dt by n_substeps). The previous code here ALSO
         ! divided dt by n_substeps and then passed the already-divided
         ! value to deplete_cell, which divided AGAIN — so each cell
         ! only advanced by dt/n_substeps² instead of dt. We now pass
         ! the full dt to deplete_cell and let it do the substepping.
+        !
+        ! OpenMP: each cell's isotope concentrations are independent,
+        ! so deplete_cell calls on different (i,j,k) are race-free.
+        !$OMP PARALLEL DO PRIVATE(i, j, k, phi_th, P) SCHEDULE(STATIC)
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
@@ -264,6 +287,7 @@ contains
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
         
         state%time = state%time + dt
         state%steps = state%steps + 1
@@ -274,45 +298,55 @@ contains
     !! initial and predicted concentrations. (Previously the copy was
     !! taken AFTER burnup_step had already advanced the state, so the
     !! "corrector" averaged the state with itself — a no-op.)
+    !!
+    !! Performance note: the previous implementation deep-copied the entire
+    !! burnup_state_t TWICE (state_init + state_pred). Each copy duplicates
+    !! all 12+ allocatable isotope arrays — O(Nx·Ny·Nz·8) bytes each. We
+    !! now keep only the single state_init copy and average in-place into
+    !! state (which already holds the predicted values after burnup_step),
+    !! eliminating one full deep-copy.
     subroutine burnup_step_predictor_corrector(state, flux, power, dt)
         type(burnup_state_t), intent(inout) :: state
         real(wp), intent(in) :: flux(:, :, :)
         real(wp), intent(in) :: power(:, :, :)
         real(wp), intent(in) :: dt
         
-        type(burnup_state_t) :: state_init, state_pred
+        type(burnup_state_t) :: state_init
         integer :: i, j, k
         
         ! Save initial state BEFORE the predictor step.
         state_init = state
         
-        ! Predictor: full step with initial conditions
+        ! Predictor: full step with initial conditions. After this call,
+        ! 'state' holds the predicted concentrations.
         call burnup_step(state, flux, power, dt)
-        state_pred = state
         
-        ! Corrector: average initial and predicted concentrations.
+        ! Corrector: average initial and predicted concentrations in-place.
+        ! OpenMP: each cell's averaging is independent.
+        !$OMP PARALLEL DO PRIVATE(i, j, k) SCHEDULE(STATIC)
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
                     state%Xe135(i, j, k) = 0.5_wp * (state_init%Xe135(i, j, k) + &
-                                                     state_pred%Xe135(i, j, k))
+                                                     state%Xe135(i, j, k))
                     state%I135(i, j, k)  = 0.5_wp * (state_init%I135(i, j, k)  + &
-                                                     state_pred%I135(i, j, k))
+                                                     state%I135(i, j, k))
                     state%Sm149(i, j, k) = 0.5_wp * (state_init%Sm149(i, j, k) + &
-                                                     state_pred%Sm149(i, j, k))
+                                                     state%Sm149(i, j, k))
                     state%Pm149(i, j, k) = 0.5_wp * (state_init%Pm149(i, j, k) + &
-                                                     state_pred%Pm149(i, j, k))
+                                                     state%Pm149(i, j, k))
                     state%U235(i, j, k)  = 0.5_wp * (state_init%U235(i, j, k)  + &
-                                                     state_pred%U235(i, j, k))
+                                                     state%U235(i, j, k))
                     state%U238(i, j, k)  = 0.5_wp * (state_init%U238(i, j, k)  + &
-                                                     state_pred%U238(i, j, k))
+                                                     state%U238(i, j, k))
                     state%Pu239(i, j, k) = 0.5_wp * (state_init%Pu239(i, j, k) + &
-                                                     state_pred%Pu239(i, j, k))
+                                                     state%Pu239(i, j, k))
                     state%Pu241(i, j, k) = 0.5_wp * (state_init%Pu241(i, j, k) + &
-                                                     state_pred%Pu241(i, j, k))
+                                                     state%Pu241(i, j, k))
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
     end subroutine burnup_step_predictor_corrector
     
     !> Deplete single cell
@@ -543,5 +577,41 @@ contains
         
         rho = worth_Xe + worth_Sm
     end function burnup_compute_reactivity_effect
+
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+    ! -----------------------------------------------------------------
+    ! GPU dispatch wrapper for the burnup depletion step.
+    ! Creates a temporary GPU state, runs the per-cell depletion kernel,
+    ! and copies the updated isotope concentrations back.
+    ! -----------------------------------------------------------------
+    subroutine burnup_step_gpu(state, flux, power, dt)
+        type(burnup_state_t), intent(inout) :: state
+        real(wp), intent(in) :: flux(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: power(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: dt
+        type(burnup_gpu_state_t) :: g
+        real(wp), allocatable :: thermal_flux(:,:,:)
+
+        ! Scale flux by thermal fraction (matching the CPU path)
+        allocate(thermal_flux(state%nx, state%ny, state%nz))
+        thermal_flux = flux * state%config%thermal_flux_fraction
+
+        ! Initialise and run GPU kernel
+        call burnup_gpu_init(g, state%nx, state%ny, state%nz)
+        call burnup_gpu_step(g, thermal_flux, power, dt, state%config%depletion_substeps)
+
+        ! Copy updated concentrations back
+        call burnup_gpu_copy_from_device(g, state%Xe135, state%I135, state%Sm149, &
+            state%Pm149, state%U235, state%U238, state%Pu239, state%Pu241, &
+            state%burnup)
+
+        call burnup_gpu_cleanup(g)
+        deallocate(thermal_flux)
+
+        ! Update state metadata
+        state%time = state%time + dt
+        state%steps = state%steps + 1
+    end subroutine burnup_step_gpu
+#endif
 
 end module burnup_depletion

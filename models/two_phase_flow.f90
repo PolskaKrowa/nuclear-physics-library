@@ -23,6 +23,15 @@
 module two_phase_flow
     use kinds, only: wp, i32
     use constants, only: PI, TOL_DEFAULT, G_GRAV
+    use compute_mode, only: use_gpu, gpu_min_workload
+#ifdef COMPUTATION_MODE_GPU
+    use two_phase_flow_gpu, only: tp_gpu_state_t, tp_gpu_init, tp_gpu_cleanup, &
+                                    tp_gpu_step, tp_gpu_copy_from_device
+#endif
+#ifdef COMPUTATION_MODE_HYBRID
+    use two_phase_flow_gpu, only: tp_gpu_state_t, tp_gpu_init, tp_gpu_cleanup, &
+                                    tp_gpu_step, tp_gpu_copy_from_device
+#endif
     implicit none
     private
     
@@ -299,6 +308,17 @@ contains
         
         integer :: i, j, k
         
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+        ! GPU dispatch: offload per-cell two-phase computation to GPU when
+        ! the problem is large enough.
+        if (use_gpu()) then
+            if (state%nx * state%ny * state%nz >= gpu_min_workload()) then
+                call two_phase_step_gpu(state, T, p, G, q_prime_prime, dt)
+                return
+            end if
+        end if
+#endif
+        
         ! Update conditions
         state%temperature = T
         state%pressure = p
@@ -311,7 +331,11 @@ contains
         state%max_void_fraction = 0.0_wp
         state%min_chf_ratio = 1.0e10_wp
         
-        ! Update each cell
+        ! Update each cell.
+        ! OpenMP: each cell is independent except for four shared statistics
+        ! (n_boiling_cells, n_chf_violations, max_void_fraction, min_chf_ratio)
+        ! which are protected by !$OMP ATOMIC inside update_cell / check_chf.
+        !$OMP PARALLEL DO PRIVATE(i, j, k) SCHEDULE(STATIC)
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
@@ -319,6 +343,7 @@ contains
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
     end subroutine two_phase_step
     
     !> Update single cell two-phase parameters
@@ -352,6 +377,7 @@ contains
         ! Check if boiling
         if (x > -TOL_DEFAULT) then
             state%boiling(i, j, k) = .true.
+            !$OMP ATOMIC
             state%n_boiling_cells = state%n_boiling_cells + 1
         else
             state%boiling(i, j, k) = .false.
@@ -374,6 +400,7 @@ contains
         end if
         
         state%void_fraction(i, j, k) = alpha
+        !$OMP ATOMIC UPDATE
         state%max_void_fraction = max(state%max_void_fraction, alpha)
         
         ! Compute slip ratio and velocities
@@ -728,10 +755,12 @@ contains
         end if
         
         state%chf_ratio(i, j, k) = chfr
+        !$OMP ATOMIC UPDATE
         state%min_chf_ratio = min(state%min_chf_ratio, chfr)
         
         ! Check for CHF violation
         if (chfr < 1.0_wp) then
+            !$OMP ATOMIC
             state%n_chf_violations = state%n_chf_violations + 1
         end if
     end subroutine check_chf_condition
@@ -940,5 +969,61 @@ contains
         
         chf_occurred = (state%n_chf_violations > 0)
     end function two_phase_check_chf
+
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+    ! -----------------------------------------------------------------
+    ! GPU dispatch wrapper for the two-phase flow step.
+    ! Creates a temporary GPU state, runs the per-cell kernel, and
+    ! copies the results back. Statistics are recomputed on the host
+    ! from the GPU output arrays.
+    ! -----------------------------------------------------------------
+    subroutine two_phase_step_gpu(state, T, p, G, q_pp, dt)
+        type(two_phase_state_t), intent(inout) :: state
+        real(wp), intent(in) :: T(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: p(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: G(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: q_pp(state%nx, state%ny, state%nz)
+        real(wp), intent(in) :: dt
+        type(tp_gpu_state_t) :: g
+        integer :: i, j, k
+        integer :: boiling_int(state%nx, state%ny, state%nz)
+
+        ! Update input conditions on host state
+        state%temperature = T
+        state%pressure = p
+        state%mass_flux = G
+        state%heat_flux = q_pp
+
+        ! Initialise and run GPU kernel
+        call tp_gpu_init(g, state%nx, state%ny, state%nz)
+        call tp_gpu_step(g, T, p, G, q_pp, state%diameter, state%heated_perimeter)
+
+        ! Copy results back
+        call tp_gpu_copy_from_device(g, state%quality, state%void_fraction, &
+            state%slip_ratio, state%velocity_liquid, state%velocity_vapour, &
+            state%chf_ratio, boiling_int)
+
+        ! Recompute statistics on host from GPU output
+        state%n_boiling_cells = 0
+        state%n_chf_violations = 0
+        state%max_void_fraction = 0.0_wp
+        state%min_chf_ratio = 1.0e10_wp
+        do k = 1, state%nz; do j = 1, state%ny; do i = 1, state%nx
+            if (boiling_int(i,j,k) == 1) then
+                state%boiling(i,j,k) = .true.
+                state%n_boiling_cells = state%n_boiling_cells + 1
+            else
+                state%boiling(i,j,k) = .false.
+            end if
+            state%max_void_fraction = max(state%max_void_fraction, state%void_fraction(i,j,k))
+            state%min_chf_ratio = min(state%min_chf_ratio, state%chf_ratio(i,j,k))
+            if (state%chf_ratio(i,j,k) < 1.0_wp) then
+                state%n_chf_violations = state%n_chf_violations + 1
+            end if
+        end do; end do; end do
+
+        call tp_gpu_cleanup(g)
+    end subroutine two_phase_step_gpu
+#endif
 
 end module two_phase_flow

@@ -363,54 +363,157 @@ contains
     end subroutine sparse_add_scaled
     
     !> Sparse matrix-matrix multiplication: C = A * B
-    !! Result may have different sparsity pattern
+    !! Result may have different sparsity pattern.
+    !!
+    !! Performance note: implements Gustavson's algorithm with a Sparse
+    !! Accumulator (SPA). The previous code allocated a fully dense
+    !! A%nrows × B%ncols intermediate — for two 10⁵×10⁵ matrices with
+    !! ~10 nnz/row that allocated ~80 GB. We now accumulate each row of C
+    !! in a dense workspace of size B%ncols (typically a few KB), then
+    !! extract only the non-zeros into C's CSR structure. Memory usage is
+    !! O(nnz(C) + B%ncols) instead of O(A%nrows × B%ncols).
     subroutine sparse_matrix_mult(A, B, C, status)
         type(sparse_matrix_t), intent(in) :: A, B
         type(sparse_matrix_t), intent(out) :: C
         integer(i32), intent(out), optional :: status
         
-        real(wp), allocatable :: row_dense(:)
-        real(wp), allocatable :: C_dense(:, :)
-        integer :: i, j
-        integer(i64) :: k, start_idx, end_idx
+        ! SPA workspace
+        real(wp), allocatable :: acc_values(:)      ! dense accumulator, size B%ncols
+        integer, allocatable :: acc_marker(:)       ! marks which cols were touched, size B%ncols
+        integer, allocatable :: acc_cols(:)         ! list of touched columns per row
+        
+        ! CSR build buffers. C_row_ptr and row_offset MUST be integer(i64)
+        ! to match the sparse_matrix_t%row_ptr field kind (i64) — otherwise
+        ! move_alloc fails with a kind mismatch. C_col_indices is integer
+        ! (default kind) to match sparse_matrix_t%col_indices.
+        integer(i64), allocatable :: C_row_ptr(:)
+        real(wp), allocatable :: C_values(:)
+        integer, allocatable :: C_col_indices(:)
+        integer, allocatable :: row_nnz(:)          ! nnz per row of C
+        integer(i64), allocatable :: row_offset(:)  ! prefix sum of row_nnz
+        
+        ! Loop indices. k/a_start/a_end/b_start/b_end come from A%row_ptr
+        ! and B%row_ptr which are integer(i64), so they must be i64 too.
+        ! kk_inner is i64 (indexes B%values/col_indices via row_ptr);
+        ! kk_extract is plain integer (iterates 1..pos for extraction).
+        integer :: i, j, col_b, pos, kk_extract
+        integer(i64) :: k, a_start, a_end, b_start, b_end, nnz_C, kk_inner
+        integer, parameter :: UNTOUCHED = -1
         
         if (A%ncols /= B%nrows) then
             if (present(status)) status = SPARSE_ERR_SIZE
             return
         end if
         
-        ! Use dense intermediate for simplicity
-        allocate(C_dense(A%nrows, B%ncols))
-        allocate(row_dense(B%ncols))
-        
-        C_dense = 0.0_wp
+        ! --- Symbolic pass: count nnz per row of C ---
+        allocate(acc_values(B%ncols))
+        allocate(acc_marker(B%ncols))
+        allocate(acc_cols(B%ncols))
+        allocate(row_nnz(A%nrows))
+        row_nnz = 0
+        acc_marker = UNTOUCHED
         
         do i = 1, A%nrows
-            row_dense = 0.0_wp
+            a_start = A%row_ptr(i)
+            a_end = A%row_ptr(i + 1) - 1
+            row_nnz(i) = 0
             
-            start_idx = A%row_ptr(i)
-            end_idx = A%row_ptr(i + 1) - 1
-            
-            ! Compute row i of C
-            do k = start_idx, end_idx
+            do k = a_start, a_end
                 j = A%col_indices(k)
+                b_start = B%row_ptr(j)
+                b_end = B%row_ptr(j + 1) - 1
                 
-                ! Add A(i,j) * B(j,:)
-                do start_idx = B%row_ptr(j), B%row_ptr(j + 1) - 1
-                    row_dense(B%col_indices(start_idx)) = row_dense(B%col_indices(start_idx)) + &
-                        A%values(k) * B%values(start_idx)
+                do kk_inner = b_start, b_end
+                    col_b = B%col_indices(kk_inner)
+                    if (acc_marker(col_b) /= i) then
+                        acc_marker(col_b) = i
+                        row_nnz(i) = row_nnz(i) + 1
+                    end if
+                end do
+            end do
+        end do
+        
+        ! --- Allocate CSR arrays via prefix sum ---
+        allocate(C_row_ptr(A%nrows + 1))
+        allocate(row_offset(A%nrows))
+        C_row_ptr(1) = 1
+        do i = 1, A%nrows
+            C_row_ptr(i + 1) = C_row_ptr(i) + row_nnz(i)
+            row_offset(i) = C_row_ptr(i)
+        end do
+        nnz_C = C_row_ptr(A%nrows + 1) - 1
+        
+        allocate(C_values(nnz_C))
+        allocate(C_col_indices(nnz_C))
+        C_values = 0.0_wp
+        
+        ! --- Numerical pass: accumulate and extract ---
+        acc_marker = UNTOUCHED
+        acc_values = 0.0_wp
+        
+        do i = 1, A%nrows
+            a_start = A%row_ptr(i)
+            a_end = A%row_ptr(i + 1) - 1
+            pos = 0  ! number of non-zeros in this row so far
+            
+            do k = a_start, a_end
+                j = A%col_indices(k)
+                b_start = B%row_ptr(j)
+                b_end = B%row_ptr(j + 1) - 1
+                
+                do kk_inner = b_start, b_end
+                    col_b = B%col_indices(kk_inner)
+                    if (acc_marker(col_b) /= i) then
+                        acc_marker(col_b) = i
+                        pos = pos + 1
+                        acc_cols(pos) = col_b
+                        acc_values(col_b) = A%values(k) * B%values(kk_inner)
+                    else
+                        acc_values(col_b) = acc_values(col_b) + A%values(k) * B%values(kk_inner)
+                    end if
                 end do
             end do
             
-            C_dense(i, :) = row_dense
+            ! Extract non-zeros into C's CSR. Sort column indices for
+            ! canonical CSR ordering (required by many downstream solvers).
+            call sort_int_real_pair(acc_cols, acc_values, pos)
+            do kk_extract = 1, pos
+                C_col_indices(row_offset(i) + kk_extract - 1) = acc_cols(kk_extract)
+                C_values(row_offset(i) + kk_extract - 1) = acc_values(acc_cols(kk_extract))
+            end do
         end do
         
-        ! Convert result to sparse
-        call sparse_create_from_dense(C_dense, C)
+        ! --- Build result ---
+        C%nrows = A%nrows
+        C%ncols = B%ncols
+        C%nnz = nnz_C
+        call move_alloc(C_row_ptr, C%row_ptr)
+        call move_alloc(C_col_indices, C%col_indices)
+        call move_alloc(C_values, C%values)
         
-        deallocate(C_dense, row_dense)
+        deallocate(acc_values, acc_marker, acc_cols, row_nnz, row_offset)
         
         if (present(status)) status = SPARSE_SUCCESS
+    contains
+        ! Simple insertion sort for small column-index lists (typical row
+        ! has < 50 non-zeros). Keeps C in canonical sorted-column order.
+        subroutine sort_int_real_pair(idx, vals, n)
+            integer, intent(inout) :: idx(:)
+            real(wp), intent(inout) :: vals(:)
+            integer, intent(in) :: n
+            integer :: a, b, tmp_idx
+            do a = 2, n
+                tmp_idx = idx(a)
+                b = a - 1
+                do while (b >= 1 .and. idx(b) > tmp_idx)
+                    idx(b + 1) = idx(b)
+                    b = b - 1
+                end do
+                idx(b + 1) = tmp_idx
+            end do
+            ! vals is indexed by the column number, so it doesn't need
+            ! to be rearranged — only the index list is sorted.
+        end subroutine sort_int_real_pair
     end subroutine sparse_matrix_mult
 
 end module sparse_matrix

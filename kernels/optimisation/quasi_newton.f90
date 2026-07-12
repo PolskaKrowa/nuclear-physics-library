@@ -159,33 +159,47 @@ contains
         end if
     end subroutine bfgs_minimize
     
-    !> Update inverse Hessian using BFGS formula
-    pure subroutine bfgs_update_hessian(H, s, y, rho)
+    !> Update inverse Hessian using BFGS formula.
+    !!
+    !! Performance note: the previous code allocated an n×n identity matrix
+    !! `Id` and an `I_minus_rho_sy` matrix that were never referenced —
+    !! pure dead code costing O(n²) memory and time per iteration. We also
+    !! use BLAS dger (rank-1 update) instead of the hand-written
+    !! outer_product, which is vendor-tuned. The `pure` attribute was
+    !! removed because BLAS external subroutines have side effects.
+    subroutine bfgs_update_hessian(H, s, y, rho)
         real(wp), intent(inout) :: H(:,:)
         real(wp), intent(in) :: s(:), y(:), rho
 
-        real(wp) :: Hy(size(s)), sT_H(size(s))
-        real(wp) :: I_minus_rho_sy(size(s), size(s))
-        real(wp) :: Id(size(s), size(s))
-        integer :: i, n
+        real(wp) :: Hy(size(s))
+        real(wp) :: yTHy, alpha
+        integer :: n
+        real(wp) :: neg_rho
+        real(wp) :: dger_alpha
+
+        external :: dger, dgemv
 
         n = size(s)
 
-        ! Identity matrix
-        Id = 0.0_wp
-        do i = 1, n
-            Id(i, i) = 1.0_wp
-        end do
+        ! Compute Hy = H * y (using BLAS dgemv for predictable performance)
+        call dgemv('N', n, n, 1.0_wp, H, n, y, 1, 0.0_wp, Hy, 1)
 
-        ! Compute Hy
-        Hy = matmul(H, y)
+        ! Scalar: y^T * H * y
+        yTHy = sum(y * Hy)
 
-        ! BFGS update: H_new = (I - rho*s*y^T) * H * (I - rho*y*s^T) + rho*s*s^T
-        ! Simplified: H_new = H + rho*rho*(y^T*H*y)*s*s^T - rho*(H*y*s^T + s*y^T*H)
+        ! BFGS rank-two update:
+        !   H_new = H - rho*(H*y*s^T + s*y^T*H) + rho*(1 + rho*y^T*H*y)*s*s^T
+        !
+        ! Implemented as three BLAS dger rank-1 updates:
+        !   H = H - rho * Hy * s^T        (dger with alpha = -rho)
+        !   H = H - rho * s  * Hy^T       (dger with alpha = -rho, swapped x/y)
+        !   H = H + rho*(1 + rho*yTHy) * s * s^T  (dger with alpha = rho*(1+rho*yTHy))
 
-        ! More numerically stable rank-two update:
-        H = H - outer_product(Hy, s) * rho - outer_product(s, Hy) * rho &
-            + (1.0_wp + rho * sum(y * Hy)) * outer_product(s, s) * rho
+        neg_rho = -rho
+        call dger(n, n, neg_rho, Hy, 1, s, 1, H, n)        ! H += -rho * Hy * s^T
+        call dger(n, n, neg_rho, s, 1, Hy, 1, H, n)        ! H += -rho * s * Hy^T
+        dger_alpha = rho * (1.0_wp + rho * yTHy)
+        call dger(n, n, dger_alpha, s, 1, s, 1, H, n)      ! H += alpha * s * s^T
     end subroutine bfgs_update_hessian
 
     !> Limited-memory BFGS method

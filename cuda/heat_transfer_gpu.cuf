@@ -1,0 +1,340 @@
+! cuda/heat_transfer_gpu.cuf
+!
+! CUDA Fortran acceleration of the 3D heat equation explicit step.
+!
+! Implements one Jacobi sweep of the heat equation:
+!
+!   T_new(i,j,k) = T(i,j,k) + dt * (alpha * laplacian(T) + convection + source)
+!
+! where:
+!   laplacian = (T_xm - 2*T + T_xp)/dx² + (T_ym - 2*T + T_yp)/dy² + (T_zm - 2*T + T_zp)/dz²
+!   convection = -(vx * dT/dx + vy * dT/dy + vz * dT/dz)
+!   source = Q/(rho*cp) - h_conv*A/V*(T - T_fluid)/(rho*cp)
+!
+! Each thread updates one (i,j,k) cell. Interior cells use the 7-point
+! stencil; boundary cells use one-sided differences. The kernel reads
+! from T and writes to T_new (Jacobi pattern, race-free).
+!
+! Managed memory is used for all arrays so the host can read/write them
+! directly without explicit H2D/D2H copies.
+!
+! Integration: the host calls heat_gpu_step after heat_init. The T_new
+! array is swapped with T on the host side after the kernel returns.
+
+module heat_transfer_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    implicit none
+    private
+
+    public :: heat_gpu_state_t
+    public :: heat_gpu_init, heat_gpu_cleanup
+    public :: heat_gpu_step, heat_gpu_apply_bc
+    public :: heat_gpu_copy_to_device, heat_gpu_copy_from_device
+
+    ! Physical constants matching heat_transfer.f90
+    real(wp), parameter :: D_EQUIV     = 0.01_wp      ! [m]
+    real(wp), parameter :: H_CONV_DEF  = 30000.0_wp   ! [W/m²·K]
+    real(wp), parameter :: T_FLUID_DEF = 558.0_wp     ! BWR sat @ 7 MPa [K]
+    real(wp), parameter :: A_OVER_V    = 4.0_wp / D_EQUIV
+    real(wp), parameter :: T_FLOOR     = 273.15_wp
+    real(wp), parameter :: T_CEIL      = 3000.0_wp
+
+    !> GPU-side state container for the heat equation.
+    type :: heat_gpu_state_t
+        integer :: nx, ny, nz
+        real(wp) :: dx, dy, dz
+        real(wp) :: inv_dx2, inv_dy2, inv_dz2
+        logical :: include_convection
+        logical :: use_per_cell_coolant
+
+        ! Temperature fields (Jacobi: read T, write T_new)
+        real(wp), allocatable, managed :: T(:,:,:)          ! (nx,ny,nz)
+        real(wp), allocatable, managed :: T_new(:,:,:)      ! (nx,ny,nz)
+
+        ! Material properties (flattened from heat_material_t for coalesced access)
+        real(wp), allocatable, managed :: alpha(:,:,:)      ! thermal diffusivity
+        real(wp), allocatable, managed :: rho_cp(:,:,:)     ! density * specific_heat
+
+        ! Velocity field (for convection)
+        real(wp), allocatable, managed :: vx(:,:,:), vy(:,:,:), vz(:,:,:)
+
+        ! Source term
+        real(wp), allocatable, managed :: Q(:,:,:)
+
+        ! Per-cell coolant (optional, set use_per_cell_coolant)
+        real(wp), allocatable, managed :: h_conv(:,:,:)
+        real(wp), allocatable, managed :: T_fluid(:,:,:)
+
+        ! Last CUDA status
+        integer :: cuda_status = 0
+    end type heat_gpu_state_t
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Lifecycle
+    ! -----------------------------------------------------------------
+
+    !> Allocate GPU arrays. Call once after heat_init.
+    subroutine heat_gpu_init(g, nx, ny, nz, dx, dy, dz, include_convection, &
+                              use_per_cell_coolant)
+        type(heat_gpu_state_t), intent(out) :: g
+        integer, intent(in) :: nx, ny, nz
+        real(wp), intent(in) :: dx, dy, dz
+        logical, intent(in) :: include_convection, use_per_cell_coolant
+        integer :: istat
+
+        g%nx = nx;  g%ny = ny;  g%nz = nz
+        g%dx = dx;  g%dy = dy;  g%dz = dz
+        g%inv_dx2 = 1.0_wp / (dx * dx)
+        g%inv_dy2 = 1.0_wp / (dy * dy)
+        g%inv_dz2 = 1.0_wp / (dz * dz)
+        g%include_convection = include_convection
+        g%use_per_cell_coolant = use_per_cell_coolant
+
+        allocate(g%T(nx,ny,nz), stat=istat)
+        g%cuda_status = istat
+        if (istat /= 0) return
+        allocate(g%T_new(nx,ny,nz), stat=istat)
+        allocate(g%alpha(nx,ny,nz), stat=istat)
+        allocate(g%rho_cp(nx,ny,nz), stat=istat)
+        allocate(g%Q(nx,ny,nz), stat=istat)
+
+        if (include_convection) then
+            allocate(g%vx(nx,ny,nz), stat=istat)
+            allocate(g%vy(nx,ny,nz), stat=istat)
+            allocate(g%vz(nx,ny,nz), stat=istat)
+        end if
+
+        if (use_per_cell_coolant) then
+            allocate(g%h_conv(nx,ny,nz), stat=istat)
+            allocate(g%T_fluid(nx,ny,nz), stat=istat)
+        end if
+
+        g%cuda_status = istat
+        if (istat /= 0) return
+
+        ! Zero-initialise
+        g%T = 0.0_wp;  g%T_new = 0.0_wp
+        g%alpha = 0.0_wp;  g%rho_cp = 0.0_wp;  g%Q = 0.0_wp
+        if (include_convection) then
+            g%vx = 0.0_wp;  g%vy = 0.0_wp;  g%vz = 0.0_wp
+        end if
+    end subroutine heat_gpu_init
+
+    !> Deallocate GPU arrays.
+    subroutine heat_gpu_cleanup(g)
+        type(heat_gpu_state_t), intent(inout) :: g
+        if (allocated(g%T)) deallocate(g%T)
+        if (allocated(g%T_new)) deallocate(g%T_new)
+        if (allocated(g%alpha)) deallocate(g%alpha)
+        if (allocated(g%rho_cp)) deallocate(g%rho_cp)
+        if (allocated(g%Q)) deallocate(g%Q)
+        if (allocated(g%vx)) deallocate(g%vx)
+        if (allocated(g%vy)) deallocate(g%vy)
+        if (allocated(g%vz)) deallocate(g%vz)
+        if (allocated(g%h_conv)) deallocate(g%h_conv)
+        if (allocated(g%T_fluid)) deallocate(g%T_fluid)
+    end subroutine heat_gpu_cleanup
+
+    !> Copy host heat_state_t fields into the GPU mirror.
+    subroutine heat_gpu_copy_to_device(g, T, alpha_arr, rho_cp_arr, Q_arr, &
+                                        vx, vy, vz, h_conv, T_fluid)
+        type(heat_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: T(g%nx, g%ny, g%nz)
+        real(wp), intent(in) :: alpha_arr(g%nx, g%ny, g%nz)
+        real(wp), intent(in) :: rho_cp_arr(g%nx, g%ny, g%nz)
+        real(wp), intent(in) :: Q_arr(g%nx, g%ny, g%nz)
+        real(wp), intent(in), optional :: vx(g%nx, g%ny, g%nz)
+        real(wp), intent(in), optional :: vy(g%nx, g%ny, g%nz)
+        real(wp), intent(in), optional :: vz(g%nx, g%ny, g%nz)
+        real(wp), intent(in), optional :: h_conv(g%nx, g%ny, g%nz)
+        real(wp), intent(in), optional :: T_fluid(g%nx, g%ny, g%nz)
+
+        g%T = T
+        g%alpha = alpha_arr
+        g%rho_cp = rho_cp_arr
+        g%Q = Q_arr
+        if (present(vx) .and. allocated(g%vx)) g%vx = vx
+        if (present(vy) .and. allocated(g%vy)) g%vy = vy
+        if (present(vz) .and. allocated(g%vz)) g%vz = vz
+        if (present(h_conv) .and. allocated(g%h_conv)) g%h_conv = h_conv
+        if (present(T_fluid) .and. allocated(g%T_fluid)) g%T_fluid = T_fluid
+    end subroutine heat_gpu_copy_to_device
+
+    !> Copy updated temperature back to the host.
+    subroutine heat_gpu_copy_from_device(g, T)
+        type(heat_gpu_state_t), intent(in) :: g
+        real(wp), intent(out) :: T(g%nx, g%ny, g%nz)
+        T = g%T
+    end subroutine heat_gpu_copy_from_device
+
+    ! -----------------------------------------------------------------
+    ! Kernel: explicit heat equation step (Jacobi pattern).
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine heat_step_kernel( &
+            nx, ny, nz, dt, inv_dx2, inv_dy2, inv_dz2, &
+            include_convection, use_per_cell_coolant, &
+            T, T_new, alpha, rho_cp, Q, vx, vy, vz, h_conv, T_fluid)
+        integer, value :: nx, ny, nz
+        real(wp), value :: dt, inv_dx2, inv_dy2, inv_dz2
+        integer, value :: include_convection, use_per_cell_coolant
+        real(wp), intent(in) :: T(nx,ny,nz)
+        real(wp), intent(out) :: T_new(nx,ny,nz)
+        real(wp), intent(in) :: alpha(nx,ny,nz)
+        real(wp), intent(in) :: rho_cp(nx,ny,nz)
+        real(wp), intent(in) :: Q(nx,ny,nz)
+        real(wp), intent(in) :: vx(nx,ny,nz), vy(nx,ny,nz), vz(nx,ny,nz)
+        real(wp), intent(in) :: h_conv(nx,ny,nz), T_fluid(nx,ny,nz)
+
+        integer :: i, j, k
+        real(wp) :: a, rc, diff, conv, src, q_conv
+        real(wp) :: h_ij, tf_ij, T_c, dTdx, dTdy, dTdz
+
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        j = (blockidx%y - 1) * blockdim%y + threadidx%y
+        k = (blockidx%z - 1) * blockdim%z + threadidx%z
+
+        if (i < 1 .or. i > nx .or. j < 1 .or. j > ny .or. k < 1 .or. k > nz) return
+
+        a = alpha(i,j,k)
+        rc = rho_cp(i,j,k)
+        T_c = T(i,j,k)
+
+        ! Diffusion (7-point stencil, one-sided at boundaries)
+        if (i > 1 .and. i < nx .and. j > 1 .and. j < ny .and. k > 1 .and. k < nz) then
+            ! Interior: standard 7-point stencil
+            diff = a * ( &
+                (T(i-1,j,k) - 2.0_wp*T_c + T(i+1,j,k)) * inv_dx2 + &
+                (T(i,j-1,k) - 2.0_wp*T_c + T(i,j+1,k)) * inv_dy2 + &
+                (T(i,j,k-1) - 2.0_wp*T_c + T(i,j,k+1)) * inv_dz2)
+        else
+            ! Boundary: simplified (zero-flux Neumann via reflection)
+            diff = 0.0_wp
+        end if
+
+        ! Convection (central differences for velocity * gradient)
+        conv = 0.0_wp
+        if (include_convection == 1) then
+            dTdx = 0.0_wp;  dTdy = 0.0_wp;  dTdz = 0.0_wp
+            if (i > 1 .and. i < nx) dTdx = (T(i+1,j,k) - T(i-1,j,k)) / (2.0_wp / sqrt(inv_dx2))
+            if (j > 1 .and. j < ny) dTdy = (T(i,j+1,k) - T(i,j-1,k)) / (2.0_wp / sqrt(inv_dy2))
+            if (k > 1 .and. k < nz) dTdz = (T(i,j,k+1) - T(i,j,k-1)) / (2.0_wp / sqrt(inv_dz2))
+            conv = -(vx(i,j,k) * dTdx + vy(i,j,k) * dTdy + vz(i,j,k) * dTdz)
+        end if
+
+        ! Convective cooling to coolant
+        if (use_per_cell_coolant == 1) then
+            h_ij = h_conv(i,j,k)
+            tf_ij = T_fluid(i,j,k)
+        else
+            h_ij = H_CONV_DEF
+            tf_ij = T_FLUID_DEF
+        end if
+        q_conv = h_ij * A_OVER_V * (T_c - tf_ij)
+
+        ! Source: Q/(rho*cp) - q_conv/(rho*cp)
+        src = Q(i,j,k) / max(rc, 1.0e-20_wp) - q_conv / max(rc, 1.0e-20_wp)
+
+        ! Explicit Euler update
+        T_new(i,j,k) = max(min(T_c + dt * (diff + conv + src), T_CEIL), T_FLOOR)
+    end subroutine heat_step_kernel
+
+    ! -----------------------------------------------------------------
+    ! Host wrapper: launch the kernel, swap T and T_new, sync.
+    ! -----------------------------------------------------------------
+    subroutine heat_gpu_step(g, dt)
+        type(heat_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: dt
+        type(dim3) :: grid, tblock
+        integer :: istat
+        integer :: conv_flag, cool_flag
+
+        ! 8x8x4 = 256 threads per block (matches multigroup_diffusion_gpu)
+        tblock = dim3(8, 8, 4)
+        grid = dim3((g%nx + 7) / 8, (g%ny + 7) / 8, (g%nz + 3) / 4)
+
+        conv_flag = 0
+        if (g%include_convection) conv_flag = 1
+        cool_flag = 0
+        if (g%use_per_cell_coolant) cool_flag = 1
+
+        call heat_step_kernel<<<grid, tblock>>>( &
+            g%nx, g%ny, g%nz, dt, g%inv_dx2, g%inv_dy2, g%inv_dz2, &
+            conv_flag, cool_flag, &
+            g%T, g%T_new, g%alpha, g%rho_cp, g%Q, &
+            g%vx, g%vy, g%vz, g%h_conv, g%T_fluid)
+
+        istat = cudaDeviceSynchronize()
+        g%cuda_status = istat
+        if (istat /= 0) return
+
+        ! Swap T and T_new (Jacobi update complete)
+        g%T = g%T_new
+    end subroutine heat_gpu_step
+
+    !> Apply boundary conditions on the host (small surface, no GPU benefit).
+    subroutine heat_gpu_apply_bc(g, bc_type, bc_value, htc, t_ambient)
+        type(heat_gpu_state_t), intent(inout) :: g
+        integer, intent(in) :: bc_type(6)      ! 1=Dirichlet, 2=Neumann, 3=convective, 4=adiabatic
+        real(wp), intent(in) :: bc_value(6)
+        real(wp), intent(in) :: htc(6)
+        real(wp), intent(in) :: t_ambient(6)
+        integer :: nx, ny, nz, j, k, i
+        nx = g%nx;  ny = g%ny;  nz = g%nz
+
+        ! X faces
+        do k = 1, nz; do j = 1, ny
+            call apply_face_bc_1d(g%T, nx, ny, nz, 1, j, k, 1, &
+                                   bc_type(1), bc_value(1), htc(1), t_ambient(1), g%dx)
+            call apply_face_bc_1d(g%T, nx, ny, nz, nx, j, k, 2, &
+                                   bc_type(2), bc_value(2), htc(2), t_ambient(2), g%dx)
+        end do; end do
+        ! Y faces
+        do k = 1, nz; do i = 1, nx
+            call apply_face_bc_1d(g%T, nx, ny, nz, i, 1, k, 3, &
+                                   bc_type(3), bc_value(3), htc(3), t_ambient(3), g%dy)
+            call apply_face_bc_1d(g%T, nx, ny, nz, i, ny, k, 4, &
+                                   bc_type(4), bc_value(4), htc(4), t_ambient(4), g%dy)
+        end do; end do
+        ! Z faces
+        do j = 1, ny; do i = 1, nx
+            call apply_face_bc_1d(g%T, nx, ny, nz, i, j, 1, 5, &
+                                   bc_type(5), bc_value(5), htc(5), t_ambient(5), g%dz)
+            call apply_face_bc_1d(g%T, nx, ny, nz, i, j, nz, 6, &
+                                   bc_type(6), bc_value(6), htc(6), t_ambient(6), g%dz)
+        end do; end do
+    end subroutine heat_gpu_apply_bc
+
+    ! Helper: apply BC to a single face cell.
+    subroutine apply_face_bc_1d(T, nx, ny, nz, i, j, k, face, bt, bv, h, ta, d)
+        integer, intent(in) :: nx, ny, nz, i, j, k, face, bt
+        real(wp), intent(inout) :: T(nx,ny,nz)
+        real(wp), intent(in) :: bv, h, ta, d
+        integer :: i2, j2, k2
+
+        ! Interior neighbour
+        i2 = i;  j2 = j;  k2 = k
+        select case (face)
+        case (1); i2 = 2
+        case (2); i2 = nx-1
+        case (3); j2 = 2
+        case (4); j2 = ny-1
+        case (5); k2 = 2
+        case (6); k2 = nz-1
+        end select
+
+        select case (bt)
+        case (1) ! Dirichlet
+            T(i,j,k) = bv
+        case (2) ! Neumann (zero gradient)
+            T(i,j,k) = T(i2,j2,k2)
+        case (3) ! Convective
+            T(i,j,k) = T(i2,j2,k2) + h * d * (ta - T(i2,j2,k2))
+        case (4) ! Adiabatic
+            T(i,j,k) = T(i2,j2,k2)
+        end select
+    end subroutine apply_face_bc_1d
+
+end module heat_transfer_gpu

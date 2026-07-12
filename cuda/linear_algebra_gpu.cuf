@@ -1,0 +1,255 @@
+! cuda/linear_algebra_gpu.cuf
+!
+! CUDA Fortran acceleration of dense linear algebra operations.
+!
+! Provides GPU-accelerated versions of common BLAS Level 2/3 operations
+! using custom CUDA kernels (no external cuBLAS dependency, keeping the
+! build self-contained). For very large matrices, linking cuBLAS would
+! be faster — the kernels here are sufficient for the matrix sizes
+! typically encountered in reactor physics (n < 5000).
+!
+! Operations:
+!   - gpu_dgemv:  y = alpha * A * x + beta * y   (matrix-vector)
+!   - gpu_dgemm:  C = alpha * A * B + beta * C    (matrix-matrix)
+!   - gpu_daxpy:  y = alpha * x + y               (vector AXPY)
+!   - gpu_dnrm2:  ||x||_2                          (Euclidean norm)
+!   - gpu_dscal:  x = alpha * x                    (vector scale)
+!
+! All arrays use managed memory so the host can pass them directly.
+
+module linear_algebra_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    use reductions_gpu, only: gpu_dot
+    implicit none
+    private
+
+    public :: gpu_dgemv, gpu_dgemm, gpu_daxpy, gpu_dnrm2, gpu_dscal
+    public :: la_gpu_matvec, la_gpu_matmat
+
+    ! Block sizes
+    integer, parameter :: MV_BLOCK = 256     ! threads per block for matvec
+    integer, parameter :: MM_BLOCK = 16      ! tile size for matmat (16x16)
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Kernel: matrix-vector multiply y = alpha*A*x + beta*y.
+    ! One thread per output element y(i). Each thread computes a dot
+    ! product of row i of A with x.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine dgemv_kernel( &
+            m, n, alpha, beta, A, x, y)
+        integer, value :: m, n
+        real(wp), value :: alpha, beta
+        real(wp), intent(in) :: A(m, n)
+        real(wp), intent(in) :: x(n)
+        real(wp), intent(inout) :: y(m)
+
+        integer :: i, j, tid, block_start
+        real(wp), shared :: sdata(MV_BLOCK)
+        real(wp) :: my_sum
+
+        i = (blockidx%x - 1) * MV_BLOCK + threadidx%x
+
+        if (i <= m) then
+            my_sum = 0.0_wp
+            do j = 1, n
+                my_sum = my_sum + A(i, j) * x(j)
+            end do
+            y(i) = alpha * my_sum + beta * y(i)
+        end if
+    end subroutine dgemv_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: matrix-matrix multiply C = alpha*A*B + beta*C.
+    ! Tiled algorithm: each thread computes one element of C using
+    ! shared-memory tiles of A and B. Tile size = MM_BLOCK x MM_BLOCK.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine dgemm_kernel( &
+            m, n, k_dim, alpha, beta, A, B, C)
+        integer, value :: m, n, k_dim
+        real(wp), value :: alpha, beta
+        real(wp), intent(in) :: A(m, k_dim)
+        real(wp), intent(in) :: B(k_dim, n)
+        real(wp), intent(inout) :: C(m, n)
+
+        real(wp), shared :: Atile(MM_BLOCK, MM_BLOCK)
+        real(wp), shared :: Btile(MM_BLOCK, MM_BLOCK)
+
+        integer :: row, col, tx, ty, i, kb
+        real(wp) :: accum
+
+        tx = threadidx%x
+        ty = threadidx%y
+        row = (blockidx%x - 1) * MM_BLOCK + tx
+        col = (blockidx%y - 1) * MM_BLOCK + ty
+
+        accum = 0.0_wp
+
+        ! Loop over tiles of A (row-wise) and B (column-wise)
+        do kb = 1, k_dim, MM_BLOCK
+            ! Load tiles into shared memory
+            if (row <= m .and. (kb + tx - 1) <= k_dim) then
+                Atile(tx, ty) = A(row, kb + ty - 1)
+            else
+                Atile(tx, ty) = 0.0_wp
+            end if
+            if ((kb + tx - 1) <= k_dim .and. col <= n) then
+                Btile(tx, ty) = B(kb + tx - 1, col)
+            else
+                Btile(tx, ty) = 0.0_wp
+            end if
+            call syncthreads()
+
+            ! Multiply tiles
+            do i = 1, MM_BLOCK
+                accum = accum + Atile(i, tx) * Btile(ty, i)
+            end do
+            call syncthreads()
+        end do
+
+        if (row <= m .and. col <= n) then
+            C(row, col) = alpha * accum + beta * C(row, col)
+        end if
+    end subroutine dgemm_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: AXPY: y = alpha*x + y (one thread per element).
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine daxpy_kernel(n, alpha, x, y)
+        integer, value :: n
+        real(wp), value :: alpha
+        real(wp), intent(in) :: x(*)
+        real(wp), intent(inout) :: y(*)
+        integer :: i
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        if (i <= n) then
+            y(i) = alpha * x(i) + y(i)
+        end if
+    end subroutine daxpy_kernel
+
+    ! -----------------------------------------------------------------
+    ! Kernel: vector scale: x = alpha*x (one thread per element).
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine dscal_kernel(n, alpha, x)
+        integer, value :: n
+        real(wp), value :: alpha
+        real(wp), intent(inout) :: x(*)
+        integer :: i
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        if (i <= n) then
+            x(i) = alpha * x(i)
+        end if
+    end subroutine dscal_kernel
+
+    ! -----------------------------------------------------------------
+    ! Host wrappers.
+    ! -----------------------------------------------------------------
+
+    !> Matrix-vector multiply: y = alpha*A*x + beta*y
+    subroutine gpu_dgemv(A, x, y, alpha, beta)
+        real(wp), intent(in) :: A(:,:)
+        real(wp), intent(in) :: x(:)
+        real(wp), intent(inout) :: y(:)
+        real(wp), intent(in), optional :: alpha, beta
+        real(wp) :: alpha_val, beta_val
+        integer :: m, n, num_blocks, istat
+        type(dim3) :: grid, tblock
+
+        alpha_val = 1.0_wp;  beta_val = 0.0_wp
+        if (present(alpha)) alpha_val = alpha
+        if (present(beta)) beta_val = beta
+
+        m = size(A, 1);  n = size(A, 2)
+        num_blocks = (m + MV_BLOCK - 1) / MV_BLOCK
+        tblock = dim3(MV_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call dgemv_kernel<<<grid, tblock>>>(m, n, alpha_val, beta_val, A, x, y)
+        istat = cudaDeviceSynchronize()
+    end subroutine gpu_dgemv
+
+    !> Matrix-matrix multiply: C = alpha*A*B + beta*C
+    subroutine gpu_dgemm(A, B, C, alpha, beta)
+        real(wp), intent(in) :: A(:,:), B(:,:)
+        real(wp), intent(inout) :: C(:,:)
+        real(wp), intent(in), optional :: alpha, beta
+        real(wp) :: alpha_val, beta_val
+        integer :: m, n, k_dim, nbx, nby, istat
+        type(dim3) :: grid, tblock
+
+        alpha_val = 1.0_wp;  beta_val = 0.0_wp
+        if (present(alpha)) alpha_val = alpha
+        if (present(beta)) beta_val = beta
+
+        m = size(A, 1);  k_dim = size(A, 2);  n = size(B, 2)
+        tblock = dim3(MM_BLOCK, MM_BLOCK, 1)
+        nbx = (m + MM_BLOCK - 1) / MM_BLOCK
+        nby = (n + MM_BLOCK - 1) / MM_BLOCK
+        grid = dim3(nbx, nby, 1)
+
+        call dgemm_kernel<<<grid, tblock>>>(m, n, k_dim, alpha_val, beta_val, A, B, C)
+        istat = cudaDeviceSynchronize()
+    end subroutine gpu_dgemm
+
+    !> AXPY: y = alpha*x + y
+    subroutine gpu_daxpy(x, y, alpha)
+        real(wp), intent(in) :: x(:)
+        real(wp), intent(inout) :: y(:)
+        real(wp), intent(in), optional :: alpha
+        real(wp) :: alpha_val
+        integer :: n, num_blocks, istat
+        type(dim3) :: grid, tblock
+
+        alpha_val = 1.0_wp
+        if (present(alpha)) alpha_val = alpha
+        n = size(x)
+        num_blocks = (n + MV_BLOCK - 1) / MV_BLOCK
+        tblock = dim3(MV_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call daxpy_kernel<<<grid, tblock>>>(n, alpha_val, x, y)
+        istat = cudaDeviceSynchronize()
+    end subroutine gpu_daxpy
+
+    !> Vector scale: x = alpha*x
+    subroutine gpu_dscal(x, alpha)
+        real(wp), intent(inout) :: x(:)
+        real(wp), intent(in) :: alpha
+        integer :: n, num_blocks, istat
+        type(dim3) :: grid, tblock
+
+        n = size(x)
+        num_blocks = (n + MV_BLOCK - 1) / MV_BLOCK
+        tblock = dim3(MV_BLOCK, 1, 1)
+        grid = dim3(num_blocks, 1, 1)
+
+        call dscal_kernel<<<grid, tblock>>>(n, alpha, x)
+        istat = cudaDeviceSynchronize()
+    end subroutine gpu_dscal
+
+    !> Euclidean norm: ||x||_2 = sqrt(sum(x_i^2))
+    function gpu_dnrm2(x) result(nrm)
+        real(wp), intent(in) :: x(:)
+        real(wp) :: nrm
+        nrm = sqrt(gpu_dot(x, x, size(x)))
+    end function gpu_dnrm2
+
+    ! Aliases matching BLAS naming convention
+    subroutine la_gpu_matvec(A, x, y, alpha, beta)
+        real(wp), intent(in) :: A(:,:)
+        real(wp), intent(in) :: x(:)
+        real(wp), intent(inout) :: y(:)
+        real(wp), intent(in), optional :: alpha, beta
+        call gpu_dgemv(A, x, y, alpha, beta)
+    end subroutine la_gpu_matvec
+
+    subroutine la_gpu_matmat(A, B, C, alpha, beta)
+        real(wp), intent(in) :: A(:,:), B(:,:)
+        real(wp), intent(inout) :: C(:,:)
+        real(wp), intent(in), optional :: alpha, beta
+        call gpu_dgemm(A, B, C, alpha, beta)
+    end subroutine la_gpu_matmat
+
+end module linear_algebra_gpu

@@ -42,6 +42,7 @@
 module multigroup_diffusion_gpu
     use cudafor
     use kinds, only: wp, i32
+    use reductions_gpu, only: gpu_sum, gpu_max
     implicit none
     private
 
@@ -51,6 +52,10 @@ module multigroup_diffusion_gpu
     public :: mg_gpu_source_iteration_step
     public :: mg_gpu_apply_boundary_conditions
     public :: mg_gpu_set_albedos
+    public :: mg_gpu_compute_fission_source
+    public :: mg_gpu_fission_sum
+    public :: mg_gpu_flux_error
+    public :: mg_gpu_normalize_flux
 
     ! Mirror of the relaxation/clamp constants in multigroup_diffusion.f90.
     ! Kept here as parameters so the kernel can inline them.
@@ -369,5 +374,87 @@ contains
         g%flux(:,:,1,gg)  = g%albedo_z_min * g%flux(:,:,2,gg)
         g%flux(:,:,nz,gg) = g%albedo_z_max * g%flux(:,:,nz-1,gg)
     end subroutine mg_gpu_apply_boundary_conditions
+
+    ! -----------------------------------------------------------------
+    ! GPU-accelerated fission source computation and reductions.
+    !
+    ! These keep the eigenvalue iteration fully on the GPU — the host
+    ! no longer needs to copy flux back for sum(fission_source) or
+    ! flux error computation, eliminating H2D/D2H round-trips per
+    ! outer iteration.
+    ! -----------------------------------------------------------------
+
+    !> Kernel: compute fission source = sum_g nu_sigma_f(g) * flux(g)
+    !! for each cell. One thread per cell.
+    attributes(global) subroutine compute_fission_kernel( &
+            nx, ny, nz, ng, flux, nu_sigma_f, fission_src)
+        integer, value :: nx, ny, nz, ng
+        real(wp), intent(in) :: flux(nx,ny,nz,ng)
+        real(wp), intent(in) :: nu_sigma_f(nx,ny,nz,ng)
+        real(wp), intent(out) :: fission_src(nx,ny,nz)
+
+        integer :: i, j, k, g
+        real(wp) :: f
+
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        j = (blockidx%y - 1) * blockdim%y + threadidx%y
+        k = (blockidx%z - 1) * blockdim%z + threadidx%z
+
+        if (i < 1 .or. i > nx .or. j < 1 .or. j > ny .or. k < 1 .or. k > nz) return
+
+        f = 0.0_wp
+        do g = 1, ng
+            f = f + nu_sigma_f(i,j,k,g) * flux(i,j,k,g)
+        end do
+        fission_src(i,j,k) = f
+    end subroutine compute_fission_kernel
+
+    !> Host wrapper: compute fission source on GPU.
+    subroutine mg_gpu_compute_fission_source(g, nu_sigma_f)
+        type(mg_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: nu_sigma_f(g%nx, g%ny, g%nz, g%ng)
+        type(dim3) :: grid, tblock
+        integer :: istat
+
+        tblock = dim3(8, 8, 4)
+        grid = dim3((g%nx + 7) / 8, (g%ny + 7) / 8, (g%nz + 3) / 4)
+
+        call compute_fission_kernel<<<grid, tblock>>>( &
+            g%nx, g%ny, g%nz, g%ng, g%flux, nu_sigma_f, g%fission_src)
+        istat = cudaDeviceSynchronize()
+        g%cuda_status = istat
+    end subroutine mg_gpu_compute_fission_source
+
+    !> Compute the total fission source sum on the GPU.
+    function mg_gpu_fission_sum(g) result(total)
+        type(mg_gpu_state_t), intent(in) :: g
+        real(wp) :: total
+        total = gpu_sum(g%fission_src, g%nx * g%ny * g%nz)
+    end function mg_gpu_fission_sum
+
+    !> Compute an approximate flux error on the GPU.
+    function mg_gpu_flux_error(g) result(err)
+        type(mg_gpu_state_t), intent(in) :: g
+        real(wp) :: err
+        real(wp) :: max_flux, max_diff
+        max_flux = gpu_max(g%flux, g%nx * g%ny * g%nz * g%ng)
+        max_diff = gpu_max(g%flux_new, g%nx * g%ny * g%nz * g%ng)
+        if (max_flux > 1.0e-30_wp) then
+            err = abs(max_diff - max_flux) / max_flux
+        else
+            err = 1.0_wp
+        end if
+    end function mg_gpu_flux_error
+
+    !> Normalize the flux to unit max on the GPU.
+    subroutine mg_gpu_normalize_flux(g)
+        type(mg_gpu_state_t), intent(inout) :: g
+        real(wp) :: max_val, inv_max
+        max_val = gpu_max(g%flux, g%nx * g%ny * g%nz * g%ng)
+        if (max_val > 1.0e-30_wp) then
+            inv_max = 1.0_wp / max_val
+            g%flux = g%flux * inv_max
+        end if
+    end subroutine mg_gpu_normalize_flux
 
 end module multigroup_diffusion_gpu

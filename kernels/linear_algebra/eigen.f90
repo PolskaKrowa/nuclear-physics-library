@@ -45,6 +45,7 @@ contains
         real(wp), allocatable :: A_copy(:, :), work(:)
         integer :: n, lda, lwork, info
         character :: jobz
+        real(wp) :: wkopt
         
         n = size(A, 1)
         
@@ -64,11 +65,21 @@ contains
         end if
         
         lda = n
-        lwork = max(1, 3 * n - 1)
         
         allocate(A_copy(n, n))
+        A_copy = A
+        
+        ! Workspace query: ask dsyev for the optimal lwork. The minimum
+        ! (3n-1) forces slow unblocked code paths; the optimal is typically
+        ! 2n to 6n × block-size and can be 3-5× faster for large n.
+        allocate(work(1))
+        call dsyev(jobz, 'U', n, A_copy, lda, eigenvalues, work, -1, info)
+        wkopt = work(1)
+        deallocate(work)
+        lwork = max(int(wkopt), 3 * n - 1)
         allocate(work(lwork))
         
+        ! Re-copy A because the workspace query may have overwritten A_copy.
         A_copy = A
         
         call dsyev(jobz, 'U', n, A_copy, lda, eigenvalues, work, lwork, info)
@@ -486,6 +497,12 @@ contains
     !! (A - mu*I) is exactly singular (mu is an exact eigenvalue — caller
     !! should perturb mu), EIGEN_ERR_SIZE on bad input,
     !! EIGEN_ERR_CONVERGENCE on non-convergence within max_iter.
+    !!
+    !! Performance note: the shifted matrix (A - mu*I) is constant across
+    !! iterations, so we LU-factor it ONCE with dgetrf before the loop and
+    !! call only dgetrs (O(n²) back-substitution) per iteration. The previous
+    !! code called dgesv (which re-factors every call, O(n³)) inside the loop
+    !! — for n=500 and 50 iterations that is a ~50× speedup.
     subroutine inverse_iteration(A, mu, eigenvector, max_iter, tol, status)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(in) :: mu  ! Approximate eigenvalue
@@ -499,8 +516,8 @@ contains
         real(wp) :: norm_v, tolerance, resid
         integer :: n, iter, max_iterations, i, info
         
-        ! LAPACK dgesv: solve A*X = B (LU with partial pivoting)
-        external :: dgesv
+        ! LAPACK: dgetrf (LU factor) + dgetrs (LU solve)
+        external :: dgetrf, dgetrs
         
         n = size(A, 1)
         max_iterations = 1000
@@ -529,6 +546,17 @@ contains
             A_shift(i, i) = A_shift(i, i) - mu
         end do
         
+        ! Factor (A - mu*I) = L*U ONCE. This is the O(n³) step; all
+        ! subsequent iterations only need the O(n²) back-substitution.
+        call dgetrf(n, n, A_shift, n, ipiv, info)
+        if (info /= 0) then
+            ! A - mu*I is exactly singular: mu is an exact eigenvalue.
+            eigenvector = 0.0_wp
+            if (present(status)) status = EIGEN_ERR_SINGULAR
+            deallocate(A_shift, v, v_new, rhs, ipiv)
+            return
+        end if
+        
         ! Initial guess: normalised all-ones vector
         v = 1.0_wp
         norm_v = sqrt(sum(v**2))
@@ -542,14 +570,11 @@ contains
         
         do iter = 1, max_iterations
             rhs = v
-            ! Solve (A - mu*I) * v_new = rhs in place (rhs is overwritten
-            ! with the solution by dgesv).
-            call dgesv(n, 1, A_shift, n, ipiv, rhs, n, info)
+            ! Solve (A - mu*I) * v_new = rhs using the pre-computed LU.
+            ! dgetrs does only the O(n²) forward/back-substitution.
+            call dgetrs('N', n, 1, A_shift, n, ipiv, rhs, n, info)
             
             if (info /= 0) then
-                ! A - mu*I is exactly singular: mu is an exact eigenvalue.
-                ! Return the current v as a (rough) eigenvector and signal
-                ! the caller to perturb mu if they want a sharper result.
                 eigenvector = v
                 if (present(status)) status = EIGEN_ERR_SINGULAR
                 deallocate(A_shift, v, v_new, rhs, ipiv)

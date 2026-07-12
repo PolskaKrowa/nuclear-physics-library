@@ -26,6 +26,13 @@ module dense_matrix
 contains
 
     !> Matrix-vector multiplication: y = alpha * A * x + beta * y
+    !!
+    !! Performance note: calls BLAS dgemv directly on the input arrays.
+    !! The previous implementation triple-copied A, x, y into contiguous
+    !! workspace before every call — an O(mn) memcpy that doubled memory
+    !! traffic. BLAS accepts contiguous `intent(in)` arrays natively, so
+    !! the copies were pure overhead. Callers must pass contiguous arrays
+    !! (the default for assumed-shape with no vector subscript).
     subroutine matrix_vector_mult(A, x, y, alpha, beta, trans)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(in) :: x(:)
@@ -36,7 +43,6 @@ contains
         real(wp) :: alpha_val, beta_val
         character :: trans_char
         integer :: m, n
-        real(wp), allocatable :: A_work(:, :), x_work(:), y_work(:)
         
         external :: dgemv
         
@@ -53,22 +59,9 @@ contains
             if (trans) trans_char = 'T'
         end if
         
-        ! Create contiguous working copies
-        allocate(A_work(m, n))
-        allocate(x_work(size(x)))
-        allocate(y_work(size(y)))
-        
-        A_work = A
-        x_work = x
-        y_work = y
-        
-        ! Call BLAS dgemv
-        call dgemv(trans_char, m, n, alpha_val, A_work, m, x_work, 1, beta_val, y_work, 1)
-        
-        ! Copy result back
-        y = y_work
-        
-        deallocate(A_work, x_work, y_work)
+        ! Call BLAS dgemv directly on the input arrays (no copies).
+        ! A is column-major and contiguous in Fortran, matching BLAS layout.
+        call dgemv(trans_char, m, n, alpha_val, A, m, x, 1, beta_val, y, 1)
     end subroutine matrix_vector_mult
     
     !> Matrix-matrix multiplication: C = alpha * A * B + beta * C
@@ -118,22 +111,12 @@ contains
         ldb = size(B, 1)
         ldc = size(C, 1)
         
-        ! Create contiguous working copies
-        allocate(A_work(size(A, 1), size(A, 2)))
-        allocate(B_work(size(B, 1), size(B, 2)))
-        allocate(C_work(size(C, 1), size(C, 2)))
-        
-        A_work = A
-        B_work = B
-        C_work = C
-        
+        ! Call BLAS dgemm directly on the input arrays (no copies).
+        ! Fortran's column-major layout matches BLAS exactly, so the
+        ! assumed-shape arrays can be passed straight through. The previous
+        ! implementation triple-copied A, B, C — O(mn+mk+nk) memcpy per call.
         call dgemm(transA_char, transB_char, m, n, k, alpha_val, &
-                   A_work, lda, B_work, ldb, beta_val, C_work, ldc)
-        
-        ! Copy result back
-        C = C_work
-        
-        deallocate(A_work, B_work, C_work)
+                   A, lda, B, ldb, beta_val, C, ldc)
     end subroutine matrix_matrix_mult
     
     !> Transpose a matrix
@@ -173,7 +156,10 @@ contains
         real(wp) :: nrm
         character(len=1) :: norm_char
         integer :: m, n
-        real(wp), allocatable :: work(:), A_work(:, :)
+        ! dlange needs a work array of length max(1,m) only for the 'I' norm.
+        ! For 'F'/'1'/'O' norms work is not referenced, but LAPACK requires
+        ! the argument to be present — a zero-length array is fine.
+        real(wp), allocatable :: work(:)
         
         double precision, external :: dlange
         
@@ -183,18 +169,19 @@ contains
         norm_char = 'F'  ! Default: Frobenius norm
         if (present(norm_type)) norm_char = norm_type
         
-        allocate(A_work(m, n))
-        A_work = A
-        
+        ! dlange overwrites the work array only for the 'I' (infinity) norm;
+        ! for 'F'/'1'/'O' it is not referenced. We always allocate it so the
+        ! LAPACK argument is valid. We call dlange directly on A (no copy) —
+        ! dlange does not modify its matrix argument.
         if (norm_char == 'I' .or. norm_char == 'i') then
-            allocate(work(m))
+            allocate(work(max(1, m)))
         else
             allocate(work(1))
         end if
         
-        nrm = dlange(norm_char, m, n, A_work, m, work)
+        nrm = dlange(norm_char, m, n, A, m, work)
         
-        deallocate(work, A_work)
+        deallocate(work)
     end function matrix_norm
     
     !> Compute matrix trace (sum of diagonal elements)
@@ -263,35 +250,47 @@ contains
         if (present(status)) status = MAT_SUCCESS
     end function matrix_determinant
     
-    !> Compute matrix rank using SVD
+    !> Compute matrix rank via SVD.
+    !!
+    !! Performance note: requests only singular values ('N','N') from dgesvd.
+    !! The previous code requested full U (m×m) and Vt (n×n) — O(m²+n²)
+    !! wasted storage and work — for a quantity that only needs the
+    !! singular value vector s.
     function matrix_rank(A, tol) result(rnk)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(in), optional :: tol
         integer :: rnk
         
-        real(wp), allocatable :: A_copy(:, :), s(:), u(:, :), vt(:, :), work(:)
+        real(wp), allocatable :: A_copy(:, :), s(:), work(:)
         integer :: m, n, lwork, info, i
+        real(wp) :: wkopt
         real(wp) :: tolerance
         
         external :: dgesvd
         
         m = size(A, 1)
         n = size(A, 2)
-        lwork = max(3 * min(m, n) + max(m, n), 5 * min(m, n))
         
         tolerance = TOL_DEFAULT
         if (present(tol)) tolerance = tol
         
         allocate(A_copy(m, n))
         allocate(s(min(m, n)))
-        allocate(u(m, m))
-        allocate(vt(n, n))
+        
+        ! Workspace query: ask dgesvd for the optimal lwork.
+        allocate(work(1))
+        A_copy = A
+        call dgesvd('N', 'N', m, n, A_copy, m, s, A_copy, 1, A_copy, 1, work, -1, info)
+        wkopt = work(1)
+        deallocate(work)
+        lwork = max(int(wkopt), max(3 * min(m, n) + max(m, n), 5 * min(m, n)))
         allocate(work(lwork))
         
+        ! Re-copy because the workspace query may have touched A_copy.
         A_copy = A
         
-        ! Compute SVD
-        call dgesvd('A', 'A', m, n, A_copy, m, s, u, m, vt, n, work, lwork, info)
+        ! Compute singular values only — no U, no Vt.
+        call dgesvd('N', 'N', m, n, A_copy, m, s, A_copy, 1, A_copy, 1, work, lwork, info)
         
         ! Count singular values above tolerance
         rnk = 0
@@ -303,7 +302,7 @@ contains
             end do
         end if
         
-        deallocate(A_copy, s, u, vt, work)
+        deallocate(A_copy, s, work)
     end function matrix_rank
     
     !> Compute matrix condition number
@@ -341,7 +340,12 @@ contains
         deallocate(A_copy, s, u, vt, work)
     end function matrix_condition_number
     
-    !> Compute matrix inverse using LU decomposition
+    !> Compute matrix inverse using LU decomposition.
+    !!
+    !! Performance note: uses a LAPACK workspace query to obtain the optimal
+    !! lwork for dgetri. The previous code used a fixed lwork = n*64 which
+    !! is often too small (forcing slow blocked code paths) or too large
+    !! (wasting memory).
     subroutine matrix_inverse(A, Ainv, status)
         real(wp), intent(in) :: A(:, :)
         real(wp), intent(out) :: Ainv(:, :)
@@ -350,6 +354,7 @@ contains
         integer, allocatable :: ipiv(:)
         real(wp), allocatable :: work(:)
         integer :: n, info, lwork
+        real(wp) :: wkopt
         
         external :: dgetrf, dgetri
         
@@ -360,9 +365,7 @@ contains
             return
         end if
         
-        lwork = n * 64
         allocate(ipiv(n))
-        allocate(work(lwork))
         
         Ainv = A
         
@@ -371,9 +374,17 @@ contains
         
         if (info /= 0) then
             if (present(status)) status = MAT_ERR_SINGULAR
-            deallocate(ipiv, work)
+            deallocate(ipiv)
             return
         end if
+        
+        ! Workspace query for dgetri.
+        allocate(work(1))
+        call dgetri(n, Ainv, n, ipiv, work, -1, info)
+        wkopt = work(1)
+        deallocate(work)
+        lwork = max(int(wkopt), n * 32)
+        allocate(work(lwork))
         
         ! Invert using LU
         call dgetri(n, Ainv, n, ipiv, work, lwork, info)

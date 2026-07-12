@@ -133,7 +133,15 @@ contains
     
     function test_real_kinds() result(pass)
         logical :: pass
+        ! qp is real128 (kind=16) on gfortran/ifort, but aliases to
+        ! real64 (kind=8) on NVHPC's nvfortran which does not support
+        ! 128-bit reals. Accept either so the test passes in both
+        ! COMPUTATION_MODE=CPU and HYBRID/GPU builds.
+#if !defined(__NVCOMPILER) && !defined(__PGI)
         pass = (sp == 4) .and. (dp == 8) .and. (qp == 16)
+#else
+        pass = (sp == 4) .and. (dp == 8) .and. (qp == 8)
+#endif
     end function
     
     function test_working_precision() result(pass)

@@ -1,0 +1,271 @@
+! cuda/burnup_depletion_gpu.cuf
+!
+! CUDA Fortran acceleration of the burnup/depletion per-cell update.
+!
+! Each thread depletes one (i,j,k) cell's isotope concentrations using
+! explicit Euler with internal substepping. The depletion equations are:
+!
+!   dI135/dt  = gamma_I * sigma_f * phi      - lambda_I * I135
+!   dXe135/dt = gamma_Xe * sigma_f * phi + lambda_I * I135
+!               - (lambda_Xe + sigma_a_Xe * phi) * Xe135
+!   dPm149/dt = gamma_Pm * sigma_f * phi      - lambda_Pm * Pm149
+!   dSm149/dt = lambda_Pm * Pm149 - sigma_a_Sm * phi * Sm149
+!   dU235/dt  = -sigma_a_U235 * phi * U235
+!   dU238/dt  = -sigma_a_U238 * phi * U238
+!   dPu239/dt = sigma_c_U238 * phi * U238 - sigma_a_Pu239 * phi * Pu239
+!   dPu241/dt = sigma_c_Pu240 * phi * Pu240 - sigma_a_Pu241 * phi * Pu241
+!
+! All cells are independent → embarrassingly parallel on GPU.
+
+module burnup_depletion_gpu
+    use cudafor
+    use kinds, only: wp, i32
+    implicit none
+    private
+
+    public :: burnup_gpu_state_t
+    public :: burnup_gpu_init, burnup_gpu_cleanup
+    public :: burnup_gpu_step, burnup_gpu_copy_from_device
+
+    ! Isotope decay constants [1/s]
+    real(wp), parameter :: LAMBDA_I135  = 2.87e-5_wp    ! I-135
+    real(wp), parameter :: LAMBDA_XE135 = 2.09e-5_wp    ! Xe-135
+    real(wp), parameter :: LAMBDA_PM149 = 3.63e-6_wp    ! Pm-149
+    real(wp), parameter :: LAMBDA_SM149 = 0.0_wp         ! Sm-149 is stable
+
+    ! Yields per fission
+    real(wp), parameter :: GAMMA_I135  = 0.063_wp
+    real(wp), parameter :: GAMMA_XE135 = 0.003_wp
+    real(wp), parameter :: GAMMA_PM149 = 0.01072_wp
+
+    !> GPU-side state for burnup depletion.
+    type :: burnup_gpu_state_t
+        integer :: nx, ny, nz
+
+        ! Isotope concentrations [atoms/barn-cm or atoms/cm³]
+        real(wp), allocatable, managed :: Xe135(:,:,:)
+        real(wp), allocatable, managed :: I135(:,:,:)
+        real(wp), allocatable, managed :: Sm149(:,:,:)
+        real(wp), allocatable, managed :: Pm149(:,:,:)
+        real(wp), allocatable, managed :: U235(:,:,:)
+        real(wp), allocatable, managed :: U238(:,:,:)
+        real(wp), allocatable, managed :: Pu239(:,:,:)
+        real(wp), allocatable, managed :: Pu241(:,:,:)
+
+        ! Cross sections (per cell, for flexibility)
+        real(wp), allocatable, managed :: sigma_f(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_Xe(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_Sm(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_U235(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_U238(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_Pu239(:,:,:)
+        real(wp), allocatable, managed :: sigma_a_Pu241(:,:,:)
+
+        ! Burnup tracking
+        real(wp), allocatable, managed :: burnup(:,:,:)    ! [MWd/kg]
+
+        integer :: cuda_status = 0
+    end type burnup_gpu_state_t
+
+contains
+
+    ! -----------------------------------------------------------------
+    ! Kernel: per-cell depletion step with internal substepping.
+    ! -----------------------------------------------------------------
+    attributes(global) subroutine burnup_step_kernel( &
+            nx, ny, nz, dt, n_substeps, phi_thermal, power, &
+            Xe135, I135, Sm149, Pm149, U235, U238, Pu239, Pu241, &
+            sigma_f, sigma_a_Xe, sigma_a_Sm, sigma_a_U235, &
+            sigma_a_U238, sigma_a_Pu239, sigma_a_Pu241, burnup)
+        integer, value :: nx, ny, nz, n_substeps
+        real(wp), value :: dt
+        real(wp), intent(in) :: phi_thermal(nx,ny,nz)
+        real(wp), intent(in) :: power(nx,ny,nz)
+        real(wp), intent(inout) :: Xe135(nx,ny,nz), I135(nx,ny,nz)
+        real(wp), intent(inout) :: Sm149(nx,ny,nz), Pm149(nx,ny,nz)
+        real(wp), intent(inout) :: U235(nx,ny,nz), U238(nx,ny,nz)
+        real(wp), intent(inout) :: Pu239(nx,ny,nz), Pu241(nx,ny,nz)
+        real(wp), intent(in) :: sigma_f(nx,ny,nz), sigma_a_Xe(nx,ny,nz)
+        real(wp), intent(in) :: sigma_a_Sm(nx,ny,nz), sigma_a_U235(nx,ny,nz)
+        real(wp), intent(in) :: sigma_a_U238(nx,ny,nz), sigma_a_Pu239(nx,ny,nz)
+        real(wp), intent(in) :: sigma_a_Pu241(nx,ny,nz)
+        real(wp), intent(inout) :: burnup(nx,ny,nz)
+
+        integer :: i, j, k, sub
+        real(wp) :: phi, sf, sub_dt
+        real(wp) :: xe, i135, sm, pm, u5, u8, pu9, pu1
+        real(wp) :: sf_phi, absorption_xe, absorption_sm
+        real(wp) :: dxe, di135, dsm, dpm, du5, du8, dpu9, dpu1
+
+        i = (blockidx%x - 1) * blockdim%x + threadidx%x
+        j = (blockidx%y - 1) * blockdim%y + threadidx%y
+        k = (blockidx%z - 1) * blockdim%z + threadidx%z
+
+        if (i < 1 .or. i > nx .or. j < 1 .or. j > ny .or. k < 1 .or. k > nz) return
+
+        phi = phi_thermal(i,j,k)
+        sf = sigma_f(i,j,k)
+
+        xe = Xe135(i,j,k);  i135 = I135(i,j,k)
+        sm = Sm149(i,j,k);  pm = Pm149(i,j,k)
+        u5 = U235(i,j,k);   u8 = U238(i,j,k)
+        pu9 = Pu239(i,j,k); pu1 = Pu241(i,j,k)
+
+        sub_dt = dt / real(n_substeps, wp)
+
+        do sub = 1, n_substeps
+            sf_phi = sf * phi
+
+            ! I-135: production from fission, decay
+            di135 = GAMMA_I135 * sf_phi - LAMBDA_I135 * i135
+
+            ! Xe-135: production from I-135 decay + direct fission yield,
+            !         loss by decay + absorption
+            absorption_xe = sigma_a_Xe(i,j,k) * phi
+            dxe = GAMMA_XE135 * sf_phi + LAMBDA_I135 * i135 - &
+                  (LAMBDA_XE135 + absorption_xe) * xe
+
+            ! Pm-149: production from fission, decay
+            dpm = GAMMA_PM149 * sf_phi - LAMBDA_PM149 * pm
+
+            ! Sm-149: production from Pm-149 decay, loss by absorption
+            absorption_sm = sigma_a_Sm(i,j,k) * phi
+            dsm = LAMBDA_PM149 * pm - absorption_sm * sm
+
+            ! U-235: loss by absorption
+            du5 = -sigma_a_U235(i,j,k) * phi * u5
+
+            ! U-238: loss by absorption
+            du8 = -sigma_a_U238(i,j,k) * phi * u8
+
+            ! Pu-239: production from U-238 capture, loss by absorption
+            dpu9 = sigma_a_U238(i,j,k) * phi * u8 * 0.6_wp - &  ! 60% capture vs fission
+                   sigma_a_Pu239(i,j,k) * phi * pu9
+
+            ! Pu-241: simplified (would come from Pu-240 capture)
+            dpu1 = -sigma_a_Pu241(i,j,k) * phi * pu1
+
+            ! Explicit Euler update
+            i135 = i135 + sub_dt * di135
+            xe = xe + sub_dt * dxe
+            pm = pm + sub_dt * dpm
+            sm = sm + sub_dt * dsm
+            u5 = max(0.0_wp, u5 + sub_dt * du5)
+            u8 = max(0.0_wp, u8 + sub_dt * du8)
+            pu9 = max(0.0_wp, pu9 + sub_dt * dpu9)
+            pu1 = max(0.0_wp, pu1 + sub_dt * dpu1)
+
+            ! Prevent negative concentrations
+            i135 = max(0.0_wp, i135)
+            xe = max(0.0_wp, xe)
+            pm = max(0.0_wp, pm)
+            sm = max(0.0_wp, sm)
+        end do
+
+        ! Write back
+        Xe135(i,j,k) = xe;  I135(i,j,k) = i135
+        Sm149(i,j,k) = sm;  Pm149(i,j,k) = pm
+        U235(i,j,k) = u5;   U238(i,j,k) = u8
+        Pu239(i,j,k) = pu9; Pu241(i,j,k) = pu1
+
+        ! Update burnup [MWd/kg]: power [W/cm³] * dt [s] / (density * volume)
+        ! Simplified: accumulate power * dt / 1e6 (arbitrary normalisation)
+        burnup(i,j,k) = burnup(i,j,k) + power(i,j,k) * dt / 1.0e6_wp
+    end subroutine burnup_step_kernel
+
+    ! -----------------------------------------------------------------
+    ! Lifecycle and host wrappers.
+    ! -----------------------------------------------------------------
+
+    subroutine burnup_gpu_init(g, nx, ny, nz)
+        type(burnup_gpu_state_t), intent(out) :: g
+        integer, intent(in) :: nx, ny, nz
+        integer :: istat
+
+        g%nx = nx;  g%ny = ny;  g%nz = nz
+
+        allocate(g%Xe135(nx,ny,nz), stat=istat)
+        g%cuda_status = istat;  if (istat /= 0) return
+        allocate(g%I135(nx,ny,nz), stat=istat)
+        allocate(g%Sm149(nx,ny,nz), stat=istat)
+        allocate(g%Pm149(nx,ny,nz), stat=istat)
+        allocate(g%U235(nx,ny,nz), stat=istat)
+        allocate(g%U238(nx,ny,nz), stat=istat)
+        allocate(g%Pu239(nx,ny,nz), stat=istat)
+        allocate(g%Pu241(nx,ny,nz), stat=istat)
+        allocate(g%sigma_f(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_Xe(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_Sm(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_U235(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_U238(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_Pu239(nx,ny,nz), stat=istat)
+        allocate(g%sigma_a_Pu241(nx,ny,nz), stat=istat)
+        allocate(g%burnup(nx,ny,nz), stat=istat)
+
+        g%cuda_status = istat
+        g%Xe135 = 0.0_wp;  g%I135 = 0.0_wp;  g%Sm149 = 0.0_wp;  g%Pm149 = 0.0_wp
+        g%U235 = 0.0_wp;  g%U238 = 0.0_wp;  g%Pu239 = 0.0_wp;  g%Pu241 = 0.0_wp
+        g%sigma_f = 0.0_wp;  g%sigma_a_Xe = 0.0_wp;  g%sigma_a_Sm = 0.0_wp
+        g%sigma_a_U235 = 0.0_wp;  g%sigma_a_U238 = 0.0_wp
+        g%sigma_a_Pu239 = 0.0_wp;  g%sigma_a_Pu241 = 0.0_wp
+        g%burnup = 0.0_wp
+    end subroutine burnup_gpu_init
+
+    subroutine burnup_gpu_cleanup(g)
+        type(burnup_gpu_state_t), intent(inout) :: g
+        if (allocated(g%Xe135)) deallocate(g%Xe135)
+        if (allocated(g%I135)) deallocate(g%I135)
+        if (allocated(g%Sm149)) deallocate(g%Sm149)
+        if (allocated(g%Pm149)) deallocate(g%Pm149)
+        if (allocated(g%U235)) deallocate(g%U235)
+        if (allocated(g%U238)) deallocate(g%U238)
+        if (allocated(g%Pu239)) deallocate(g%Pu239)
+        if (allocated(g%Pu241)) deallocate(g%Pu241)
+        if (allocated(g%sigma_f)) deallocate(g%sigma_f)
+        if (allocated(g%sigma_a_Xe)) deallocate(g%sigma_a_Xe)
+        if (allocated(g%sigma_a_Sm)) deallocate(g%sigma_a_Sm)
+        if (allocated(g%sigma_a_U235)) deallocate(g%sigma_a_U235)
+        if (allocated(g%sigma_a_U238)) deallocate(g%sigma_a_U238)
+        if (allocated(g%sigma_a_Pu239)) deallocate(g%sigma_a_Pu239)
+        if (allocated(g%sigma_a_Pu241)) deallocate(g%sigma_a_Pu241)
+        if (allocated(g%burnup)) deallocate(g%burnup)
+    end subroutine burnup_gpu_cleanup
+
+    !> Launch the depletion kernel.
+    subroutine burnup_gpu_step(g, flux, power, dt, n_substeps)
+        type(burnup_gpu_state_t), intent(inout) :: g
+        real(wp), intent(in) :: flux(g%nx,g%ny,g%nz), power(g%nx,g%ny,g%nz)
+        real(wp), intent(in) :: dt
+        integer, intent(in) :: n_substeps
+        type(dim3) :: grid, tblock
+        integer :: istat
+
+        tblock = dim3(8, 8, 4)
+        grid = dim3((g%nx + 7) / 8, (g%ny + 7) / 8, (g%nz + 3) / 4)
+
+        call burnup_step_kernel<<<grid, tblock>>>( &
+            g%nx, g%ny, g%nz, dt, n_substeps, flux, power, &
+            g%Xe135, g%I135, g%Sm149, g%Pm149, g%U235, g%U238, g%Pu239, g%Pu241, &
+            g%sigma_f, g%sigma_a_Xe, g%sigma_a_Sm, g%sigma_a_U235, &
+            g%sigma_a_U238, g%sigma_a_Pu239, g%sigma_a_Pu241, g%burnup)
+
+        istat = cudaDeviceSynchronize()
+        g%cuda_status = istat
+    end subroutine burnup_gpu_step
+
+    !> Copy isotope concentrations back to host.
+    subroutine burnup_gpu_copy_from_device(g, Xe135, I135, Sm149, Pm149, &
+                                            U235, U238, Pu239, Pu241, burnup)
+        type(burnup_gpu_state_t), intent(in) :: g
+        real(wp), intent(out) :: Xe135(g%nx,g%ny,g%nz), I135(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: Sm149(g%nx,g%ny,g%nz), Pm149(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: U235(g%nx,g%ny,g%nz), U238(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: Pu239(g%nx,g%ny,g%nz), Pu241(g%nx,g%ny,g%nz)
+        real(wp), intent(out) :: burnup(g%nx,g%ny,g%nz)
+
+        Xe135 = g%Xe135;  I135 = g%I135;  Sm149 = g%Sm149;  Pm149 = g%Pm149
+        U235 = g%U235;  U238 = g%U238;  Pu239 = g%Pu239;  Pu241 = g%Pu241
+        burnup = g%burnup
+    end subroutine burnup_gpu_copy_from_device
+
+end module burnup_depletion_gpu

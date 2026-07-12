@@ -25,9 +25,20 @@
 module heat_transfer
     use kinds, only: wp, i32
     use constants, only: TOL_DEFAULT
+    use compute_mode, only: use_gpu, use_hybrid, gpu_partition, gpu_min_workload
     use finite_difference, only: fd_laplacian_2d, fd_laplacian_3d, fd_derivative_2d
     use finite_volume, only: fv_diffusion_2d, fv_advection_diffusion_1d
     use solve_linear, only: solve_tridiagonal, SOLVE_SUCCESS
+#ifdef COMPUTATION_MODE_GPU
+    use heat_transfer_gpu, only: heat_gpu_state_t, heat_gpu_init, heat_gpu_cleanup, &
+                                  heat_gpu_step, heat_gpu_copy_to_device, &
+                                  heat_gpu_copy_from_device, heat_gpu_apply_bc
+#endif
+#ifdef COMPUTATION_MODE_HYBRID
+    use heat_transfer_gpu, only: heat_gpu_state_t, heat_gpu_init, heat_gpu_cleanup, &
+                                  heat_gpu_step, heat_gpu_copy_to_device, &
+                                  heat_gpu_copy_from_device, heat_gpu_apply_bc
+#endif
     implicit none
     private
     
@@ -288,6 +299,18 @@ contains
         real(wp), parameter :: T_FLUID_DEF = 558.0_wp     ! BWR sat @ 7 MPa [K]
         logical :: use_per_cell
 
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+        ! GPU / Hybrid dispatch: offload the heat step to the GPU when
+        ! the problem is large enough to amortise H2D transfer overhead.
+        ! In HYBRID mode, problems below gpu_min_workload() stay on CPU.
+        if (use_gpu()) then
+            if (state%nx * state%ny * state%nz >= gpu_min_workload()) then
+                call heat_step_gpu(state, dt)
+                return
+            end if
+        end if
+#endif
+
         allocate(laplacian(state%nx, state%ny, state%nz))
 
         state%T_old = state%T
@@ -316,6 +339,12 @@ contains
         use_per_cell = allocated(state%T_fluid) .and. allocated(state%h_conv)
 
         ! Update temperature field
+        ! OpenMP: each (i,j,k) cell is independent — the update reads T(i,j,k)
+        ! and pre-computed laplacian/gradient arrays, and writes only T(i,j,k).
+        ! All scratch scalars are declared private so threads do not race.
+        !$OMP PARALLEL DO PRIVATE(i, j, alpha, rho_cp, diffusion, convection, &
+        !$OMP                      source, h_conv_ij, T_fluid_ij, q_conv) &
+        !$OMP              SCHEDULE(STATIC)
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
@@ -361,6 +390,7 @@ contains
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
         
         ! Apply boundary conditions
         call heat_apply_bc(state)
@@ -421,6 +451,9 @@ contains
         ! ── Reaction + source: analytic implicit step on the point-wise ODE ─────
         !   dT/dt = Q/(ρcp) - β·(T - T_fluid),  β = h_conv·A/V/(ρcp)
         !   T* = (T + dt·(Q/(ρcp) + β·T_fluid)) / (1 + dt·β)
+        ! OpenMP: each cell is independent — reads material + Q + T, writes T.
+        !$OMP PARALLEL DO PRIVATE(i, j, rho_cp, h_conv_ij, T_fluid_ij, beta) &
+        !$OMP              SCHEDULE(STATIC)
         do k = 1, state%nz
             do j = 1, state%ny
                 do i = 1, state%nx
@@ -440,6 +473,7 @@ contains
                 end do
             end do
         end do
+        !$OMP END PARALLEL DO
 
         ! ── ADI sweep 1: x-direction implicit diffusion ────────────────────────
         do k = 1, state%nz
@@ -729,5 +763,70 @@ contains
         df_dz(:, :, 1) = (f(:, :, 2) - f(:, :, 1)) / dz
         df_dz(:, :, nz) = (f(:, :, nz) - f(:, :, nz - 1)) / dz
     end subroutine compute_gradient_3d
+
+#if defined(COMPUTATION_MODE_GPU) || defined(COMPUTATION_MODE_HYBRID)
+    ! -----------------------------------------------------------------
+    ! GPU dispatch wrapper for the explicit heat step.
+    !
+    ! Creates a temporary GPU state, copies the host state to the device,
+    ! runs the GPU kernel, and copies the updated temperature back. For
+    ! repeated calls (e.g. transient simulation), a persistent GPU state
+    ! should be cached in the heat_state_t — this wrapper creates and
+    ! destroys the GPU state each call for simplicity.
+    ! -----------------------------------------------------------------
+    subroutine heat_step_gpu(state, dt)
+        type(heat_state_t), intent(inout) :: state
+        real(wp), intent(in) :: dt
+        type(heat_gpu_state_t) :: g
+        logical :: use_per_cell
+        integer :: nx, ny, nz
+
+        nx = state%nx;  ny = state%ny;  nz = state%nz
+        use_per_cell = allocated(state%T_fluid) .and. allocated(state%h_conv)
+
+        ! Initialise GPU state
+        call heat_gpu_init(g, nx, ny, nz, state%dx, state%dy, state%dz, &
+                           state%config%include_convection, use_per_cell)
+
+        ! Extract flattened material properties for the GPU
+        block
+            real(wp), allocatable :: alpha_arr(:,:,:), rho_cp_arr(:,:,:)
+            integer :: i, j, k
+            allocate(alpha_arr(nx,ny,nz), rho_cp_arr(nx,ny,nz))
+            do k = 1, nz; do j = 1, ny; do i = 1, nx
+                alpha_arr(i,j,k) = state%material(i,j,k)%thermal_diffusivity
+                rho_cp_arr(i,j,k) = state%material(i,j,k)%density * &
+                                     state%material(i,j,k)%specific_heat
+            end do; end do; end do
+
+            ! Copy data to GPU and run the step
+            if (use_per_cell) then
+                call heat_gpu_copy_to_device(g, state%T, alpha_arr, rho_cp_arr, &
+                    state%Q, state%vx, state%vy, state%vz, &
+                    state%h_conv, state%T_fluid)
+            else
+                call heat_gpu_copy_to_device(g, state%T, alpha_arr, rho_cp_arr, &
+                    state%Q)
+            end if
+            deallocate(alpha_arr, rho_cp_arr)
+        end block
+
+        call heat_gpu_step(g, dt)
+
+        ! Apply boundary conditions on the host (small surface)
+        call heat_gpu_apply_bc(g, state%config%bc_type, state%config%bc_value, &
+                                state%config%htc, state%config%t_ambient)
+
+        ! Copy result back
+        call heat_gpu_copy_from_device(g, state%T)
+
+        ! Update state metadata
+        state%T_old = state%T
+        state%time = state%time + dt
+        state%steps = state%steps + 1
+
+        call heat_gpu_cleanup(g)
+    end subroutine heat_step_gpu
+#endif
 
 end module heat_transfer
