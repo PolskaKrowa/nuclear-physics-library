@@ -1,9 +1,9 @@
 set(CORE_SOURCES
-    kinds.f90
+    kinds.F90
     constants.f90
     numeric_utils.f90
     rng.f90
-    compute_mode.f90)
+    compute_mode.F90)
 
 add_library(nuclear_physics_core ${CORE_SOURCES})
 

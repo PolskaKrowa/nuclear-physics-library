@@ -1,9 +1,9 @@
 set(MODEL_SOURCES
-    heat_transfer.f90
-    two_phase_flow.f90
-    multigroup_diffusion.f90
-    cross_sections.f90
-    burnup_depletion.f90)
+    heat_transfer.F90
+    two_phase_flow.F90
+    multigroup_diffusion.F90
+    cross_sections.F90
+    burnup_depletion.F90)
 
 add_library(nuclear_physics_models ${MODEL_SOURCES})
 

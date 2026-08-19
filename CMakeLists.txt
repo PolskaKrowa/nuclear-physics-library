@@ -84,6 +84,8 @@ add_custom_target(npl_ensure_mod_dir
 
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Profiling" CACHE STRING "" FORCE)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=f2008 -fimplicit-none -Wall -Wextra -ffree-line-length-none -cpp")
     set(CMAKE_Fortran_FLAGS_DEBUG "-O0 -g -fcheck=all -fbacktrace -fimplicit-none -fno-omit-frame-pointer -pedantic ")
@@ -99,7 +101,7 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "PGI|NVHPC")
     #       nvfortran accepts F2008 features by default; use -Mstandard to
     #       warn on non-standard extensions, or omit it for permissive mode.
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -cuda -Mbackslash -Mcpp")
-    set(CMAKE_Fortran_FLAGS_RELEASE "-O2 -fast")
+    set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -fast")
     set(CMAKE_Fortran_FLAGS_DEBUG "-O0 -g -C -traceback -Kcheck")
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -stand f08 -implicitnone -warn all -extend-source")

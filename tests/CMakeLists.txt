@@ -60,11 +60,11 @@ endif()
 
 # Core library
 add_library(core
-    ../core/kinds.f90
+    ../core/kinds.F90
     ../core/constants.f90
     ../core/numeric_utils.f90
     ../core/rng.f90
-    ../core/compute_mode.f90
+    ../core/compute_mode.F90
 )
 set_target_properties(core PROPERTIES Fortran_MODULE_DIRECTORY ${TESTS_MODULE_DIR})
 
@@ -108,11 +108,11 @@ target_link_libraries(pde core)
 
 # Physics models (lives under physics/ after the reorg step-1 rename).
 add_library(models
-    ../models/heat_transfer.f90
-    ../models/two_phase_flow.f90
-    ../models/multigroup_diffusion.f90
-    ../models/cross_sections.f90
-    ../models/burnup_depletion.f90
+    ../models/heat_transfer.F90
+    ../models/two_phase_flow.F90
+    ../models/multigroup_diffusion.F90
+    ../models/cross_sections.F90
+    ../models/burnup_depletion.F90
 )
 set_target_properties(models PROPERTIES Fortran_MODULE_DIRECTORY ${TESTS_MODULE_DIR})
 target_link_libraries(models core linalg pde)
