@@ -54,7 +54,7 @@ module kinds
     ! double precision on GPU/HYBRID builds. This is acceptable for the
     ! reactor-physics workloads in this library; if true quad precision
     ! is required, build with gfortran (COMPUTATION_MODE=CPU) instead.
-    integer, parameter :: qp = real64   ! Quadruple precision -- aliased to dp on NVHPC
+    integer, parameter :: qp = dp   ! Quadruple precision -- aliased to dp on NVHPC
     ! We also expose a compile-time flag so callers can detect the
     ! fallback at preprocess time if they need to.
     ! (No public symbol needed; the __NVCOMPILER/__PGI macros themselves
