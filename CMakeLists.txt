@@ -298,6 +298,25 @@ if(OPENGL_AVAILABLE)
     message(STATUS "OpenGL visualisation enabled - bwr_core_simulator_opengl will be built")
 endif()
 
+add_executable(bwr_core_simulator examples/bwr_core_simulator.f90)
+
+target_link_libraries(bwr_core_simulator
+    nuclear_physics_models
+    nuclear_physics_kernels
+    nuclear_physics_core
+    ${LAPACK_LIBRARIES}
+    ${BLAS_LIBRARIES})
+
+if(COMPUTATION_MODE STREQUAL "GPU" OR COMPUTATION_MODE STREQUAL "HYBRID")
+    target_link_libraries(bwr_core_simulator nuclear_physics_cuda)
+    target_compile_definitions(bwr_core_simulator PRIVATE USE_CUDA)
+    target_link_options(bwr_core_simulator PRIVATE -cuda)
+endif()
+
+target_include_directories(bwr_core_simulator PRIVATE include)
+
+install(TARGETS bwr_core_simulator RUNTIME DESTINATION bin)
+
 # Export configuration
 install(EXPORT NuclearPhysicsTargets
     FILE NuclearPhysicsTargets.cmake
