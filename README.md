@@ -15,6 +15,13 @@
 
 </div>
 
+> [!WARNING]
+> **Delayed v0.4.x Updates**
+>
+> Personally made commits towards the v0.4 public beta release of the Nuclear Physics Library will be
+> significantly delayed due to the sheer complexity of the project as a whole. I'm planning on rewriting
+> major sections of the code to be more performant and maintainable.
+
 ---
 
 ## 📚 Overview
